@@ -10,7 +10,8 @@ DB_NAME = "office_admin.db"
 # 預設固定名單與參數
 EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
 EVENT_RESPONSIBLES = ["全體", "伊臻", "美釵", "涵玟", "勝順"]
-DEVICES = ["平板"]
+# 更新 3C 借用物品清單
+DEVICES = ["平板-1", "平板-2", "平板-3", "投影機"]
 DEFAULT_SUPPLIES = [
     "酒精",
     "漂白水",
@@ -417,7 +418,7 @@ elif menu == "📅 班表、排休與調班":
         st.dataframe(df_l, width="stretch")
         conn.close()
 
-# ==================== 模組 2: 工作行事登記 (起訖與全體) ====================
+# ==================== 模組 2: 工作行事登記 ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事登記與清單")
     col_e1, col_e2 = st.columns([1, 2])
@@ -476,7 +477,7 @@ elif menu == "📌 工作行事登記":
         conn.close()
         st.dataframe(df_w, width="stretch")
 
-# ==================== 模組 3: 3C產品借用申請 ====================
+# ==================== 模組 3: 3C產品借用申請 (新增平板1-3與投影機) ====================
 elif menu == "📱 3C產品借用申請":
     st.header("📱 3C產品借用申請與狀況登記")
     col_b1, col_b2 = st.columns([1, 2])
@@ -494,10 +495,10 @@ elif menu == "📱 3C產品借用申請":
             borrow_e_time = st.time_input("預計結束時間", value=time(17, 0), key="borrow_et")
 
         borrow_condition = st.radio("借用狀況檢查", ["良好", "故障"], horizontal=True, key="borrow_cond")
-        
+
         fault_description = ""
         if borrow_condition == "故障":
-            fault_description = st.text_area("⚠️ 故障說明 (請具體描述異常情況)", placeholder="例如：螢幕出現閃爍條紋、無法開機或觸控失靈...")
+            fault_description = st.text_area("⚠️ 故障說明 (請具體描述異常情況)", placeholder="例如：螢幕閃爍、無法開機、充電無反應...")
 
         if st.button("送出借用申請"):
             if borrow_s_time >= borrow_e_time:
