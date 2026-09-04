@@ -4,11 +4,13 @@ import pandas as pd
 import streamlit as st
 from streamlit_calendar import calendar
 
-# 資料庫名稱
+# 資料庫檔案名稱
 DB_NAME = "office_admin.db"
 
 # 預設固定名單與參數
 EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
+EVENT_RESPONSIBLES = ["全體", "伊臻", "美釵", "涵玟", "勝順"]
+DEVICES = ["平板"]
 DEFAULT_SUPPLIES = [
     "酒精",
     "漂白水",
@@ -24,7 +26,7 @@ DEFAULT_SUPPLIES = [
 
 
 def init_db():
-    """初始化所有資料表並具備向下相容機制"""
+    """初始化資料庫並自動檢查修復各資料表欄位"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -69,10 +71,10 @@ def init_db():
                     note TEXT)"""
     )
 
-    # 自動補齊欄位防呆檢查
+    # 自動檢查補齊 schedules 欄位
     c.execute("PRAGMA table_info(schedules)")
-    columns = [row[1] for row in c.fetchall()]
-    if "start_date" not in columns:
+    sched_cols = [row[1] for row in c.fetchall()]
+    if "start_date" not in sched_cols:
         try:
             c.execute("ALTER TABLE schedules ADD COLUMN start_date TEXT")
             c.execute("ALTER TABLE schedules ADD COLUMN end_date TEXT")
@@ -91,18 +93,46 @@ def init_db():
                     reason TEXT)"""
     )
 
-    # 5. 工作行事表
+    # 5. 工作行事表 (支援日期時間起訖與全體)
     c.execute(
         """CREATE TABLE IF NOT EXISTS work_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_date TEXT,
-                    event_time TEXT,
+                    start_date TEXT,
+                    end_date TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
                     title TEXT,
                     person_in_charge TEXT,
                     description TEXT)"""
     )
 
-    # 預載預設物資
+    # 自動檢查補齊 work_events 欄位
+    c.execute("PRAGMA table_info(work_events)")
+    we_cols = [row[1] for row in c.fetchall()]
+    if "start_date" not in we_cols:
+        try:
+            c.execute("ALTER TABLE work_events ADD COLUMN start_date TEXT")
+            c.execute("ALTER TABLE work_events ADD COLUMN end_date TEXT")
+            c.execute("ALTER TABLE work_events ADD COLUMN start_time TEXT")
+            c.execute("ALTER TABLE work_events ADD COLUMN end_time TEXT")
+        except Exception:
+            pass
+
+    # 6. 3C產品借用申請表
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS device_borrows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_name TEXT,
+                    applicant TEXT,
+                    borrow_date TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    condition TEXT,
+                    fault_desc TEXT,
+                    created_at TEXT)"""
+    )
+
+    # 預載預設物資品項
     for item in DEFAULT_SUPPLIES:
         c.execute(
             "INSERT OR IGNORE INTO supplies (item_name, stock) VALUES (?, 0)",
@@ -115,25 +145,26 @@ def init_db():
 
 init_db()
 
-# 頁面配置
+# 網頁配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
 st.title("🏢 公司內部行政管理系統")
 
-# 側邊導覽選單（新增月曆視圖選項）
+# 側邊導覽選單
 menu = st.sidebar.radio(
     "系統模組切換",
     [
         "🗓️ 互動月曆視圖",
         "📅 班表、排休與調班",
         "📌 工作行事登記",
+        "📱 3C產品借用申請",
         "🖨️ 影印輸出登記",
         "📦 物資出入庫管理",
     ],
 )
 
 
-# 計算當日班表函式 (考慮每月輪替與臨時調班)
 def get_daily_roster(query_date_str):
+    """計算指定日期的常規排班（奇偶月輪替）與臨時調班"""
     q_date = datetime.strptime(query_date_str, "%Y-%m-%d")
     month = q_date.month
 
@@ -143,7 +174,6 @@ def get_daily_roster(query_date_str):
     else:
         roster = {"美釵": "A班", "伊臻": "B班", "涵玟": "B班", "勝順": "未排班"}
 
-    # 檢查有無臨時調班紀錄覆蓋
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     swaps = c.execute(
@@ -160,68 +190,80 @@ def get_daily_roster(query_date_str):
 # ==================== 模組 0: 互動月曆視圖 ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事與同仁排休月曆")
-    st.info("💡 藍色代表【工作事項】，橘色代表【人員排休】。點擊事件可查看詳細資訊。")
+    st.info("💡 藍色標記為【工作事項】，橘色標記為【同仁排休】。點選事項可查看完整資訊。")
 
     conn = sqlite3.connect(DB_NAME)
-    # 讀取排休與工作事件
     df_schedules = pd.read_sql(
         "SELECT employee_name, leave_type, start_date, end_date, start_datetime, end_datetime, note FROM schedules",
         conn,
     )
     df_works = pd.read_sql(
-        "SELECT event_date, event_time, title, person_in_charge, description FROM work_events",
+        "SELECT start_date, end_date, start_time, end_time, title, person_in_charge, description FROM work_events",
         conn,
     )
     conn.close()
 
-    # 轉換資料庫紀錄為 FullCalendar 事件格式
     calendar_events = []
 
-    # 1. 加入排休事件 (橘色系)
+    # 1. 加入排休事件 (橘色)
     for _, row in df_schedules.iterrows():
-        # 如果沒有具體時間，則預設以日期呈現
         s_date = (
             row["start_date"]
-            if pd.notna(row["start_date"])
+            if pd.notna(row["start_date"]) and row["start_date"]
             else str(date.today())
+        )
+        e_date = (
+            row["end_date"]
+            if pd.notna(row["end_date"]) and row["end_date"]
+            else s_date
         )
         calendar_events.append(
             {
                 "title": f"🏖️ {row['employee_name']} ({row['leave_type']})",
                 "start": s_date,
-                "end": (
-                    row["end_date"] if pd.notna(row["end_date"]) else s_date
-                ),
+                "end": e_date,
                 "backgroundColor": "#FF7A00",
                 "borderColor": "#FF7A00",
                 "textColor": "#FFFFFF",
                 "extendedProps": {
                     "人員": row["employee_name"],
                     "假別": row["leave_type"],
-                    "時間": f"{row['start_datetime']} 至 {row['end_datetime']}",
+                    "時間區間": f"{row['start_datetime']} 至 {row['end_datetime']}",
                     "原因備註": row["note"],
                 },
             }
         )
 
-    # 2. 加入工作事項 (藍色系)
+    # 2. 加入工作事項 (藍色)
     for _, row in df_works.iterrows():
+        s_d = (
+            row["start_date"]
+            if pd.notna(row["start_date"]) and row["start_date"]
+            else str(date.today())
+        )
+        e_d = (
+            row["end_date"]
+            if pd.notna(row["end_date"]) and row["end_date"]
+            else s_d
+        )
         calendar_events.append(
             {
-                "title": f"💼 {row['title']} ({row['person_in_charge']})",
-                "start": row["event_date"],
+                "title": f"💼 [{row['person_in_charge']}] {row['title']}",
+                "start": f"{s_d}T{row['start_time']}:00"
+                if row["start_time"]
+                else s_d,
+                "end": f"{e_d}T{row['end_time']}:00" if row["end_time"] else e_d,
                 "backgroundColor": "#1E88E5",
                 "borderColor": "#1E88E5",
                 "textColor": "#FFFFFF",
                 "extendedProps": {
                     "負責人": row["person_in_charge"],
-                    "時間": row["event_time"],
+                    "活動期間": f"{s_d} {row['start_time']} 至 {e_d} {row['end_time']}",
                     "內容說明": row["description"],
                 },
             }
         )
 
-    # 設定 FullCalendar 參數
     calendar_options = {
         "headerToolbar": {
             "left": "today prev,next",
@@ -235,23 +277,17 @@ if menu == "🗓️ 互動月曆視圖":
         "locale": "zh-tw",
     }
 
-    # 渲染互動月曆組件
-    calendar_result = calendar(
+    cal_out = calendar(
         events=calendar_events,
         options=calendar_options,
-        custom_css="""
-        .fc-event-title {
-            font-weight: 500;
-        }
-        """,
-        key="full_calendar_view",
+        custom_css=".fc-event-title { font-weight: 500; }",
+        key="main_calendar_view",
     )
 
-    # 如果點擊了某個事件，於下方顯示詳細卡片
-    if calendar_result and "eventClick" in calendar_result:
-        clicked_event = calendar_result["eventClick"]["event"]
-        st.subheader("📌 事項詳細資訊")
-        st.json(clicked_event.get("extendedProps", {}))
+    if cal_out and "eventClick" in cal_out:
+        detail = cal_out["eventClick"]["event"].get("extendedProps", {})
+        st.subheader("📌 事項詳情")
+        st.json(detail)
 
 # ==================== 模組 1: 班表、排休與調班 ====================
 elif menu == "📅 班表、排休與調班":
@@ -260,7 +296,6 @@ elif menu == "📅 班表、排休與調班":
         ["📝 請假/排休登記", "🔄 臨時調班申請", "👀 當日班表與休假查詢"]
     )
 
-    # [子分頁 1] 請假與排休登記 (防呆：每天限1人)
     with tab_leave:
         st.subheader("排休登記 (每日限制請假最多 1 人)")
         col_l1, col_l2 = st.columns(2)
@@ -287,7 +322,6 @@ elif menu == "📅 班表、排休與調班":
             ) >= datetime.strptime(end_dt_str, "%Y-%m-%d %H:%M"):
                 st.error("結束時間必須晚於開始時間！")
             else:
-                # 檢查當日是否已有人排休
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
                 conflict = c.execute(
@@ -324,7 +358,6 @@ elif menu == "📅 班表、排休與調班":
                     st.success("排休登記成功！")
                     st.rerun()
 
-    # [子分頁 2] 臨時調班登記
     with tab_swap:
         st.subheader("臨時調班登記")
         st.info("班表預設規則：奇數月 A班(伊臻、涵玟)、B班(美釵)；偶數月對調。如有臨時變動請在此登記。")
@@ -356,7 +389,6 @@ elif menu == "📅 班表、排休與調班":
                 f"{swap_d} {swap_emp} 已成功調整為 {new_shift.split(' ')[0]}！"
             )
 
-    # [子分頁 3] 班表與排休清單
     with tab_schedule_view:
         st.subheader("查詢當日實際班表")
         check_date = st.date_input("選擇欲查詢日期", value=date.today())
@@ -385,29 +417,42 @@ elif menu == "📅 班表、排休與調班":
         st.dataframe(df_l, width="stretch")
         conn.close()
 
-# ==================== 模組 2: 工作行事登記 ====================
+# ==================== 模組 2: 工作行事登記 (起訖與全體) ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事登記與清單")
     col_e1, col_e2 = st.columns([1, 2])
 
     with col_e1:
         st.subheader("新增工作行事")
-        event_d = st.date_input("事項日期", key="we_date")
-        event_t = st.time_input("事項時間", value=time(9, 0), key="we_time")
-        event_title = st.text_input("事項標題 (例如：例行週會、客戶合約送件)")
-        event_pic = st.selectbox("負責人", EMPLOYEES, key="we_pic")
-        event_desc = st.text_area("內容說明")
+        event_s_date = st.date_input("開始日期", value=date.today(), key="we_s_date")
+        event_e_date = st.date_input("結束日期", min_value=event_s_date, value=event_s_date, key="we_e_date")
 
-        if st.button("新增行事"):
-            if event_title:
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            event_s_time = st.time_input("開始時間", value=time(9, 0), key="we_s_time")
+        with t_col2:
+            event_e_time = st.time_input("結束時間", value=time(10, 0), key="we_e_time")
+
+        event_title = st.text_input("事項/活動標題 (例如：例行週會、年度盤點)")
+        event_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, key="we_pic")
+        event_desc = st.text_area("內容說明 (選填)")
+
+        if st.button("新增工作行事"):
+            if not event_title:
+                st.warning("請填寫活動/事項標題。")
+            elif event_s_date == event_e_date and event_s_time >= event_e_time:
+                st.error("同一天活動的結束時間必須晚於開始時間！")
+            else:
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
                 c.execute(
-                    """INSERT INTO work_events (event_date, event_time, title, person_in_charge, description) 
-                             VALUES (?, ?, ?, ?, ?)""",
+                    """INSERT INTO work_events (start_date, end_date, start_time, end_time, title, person_in_charge, description) 
+                             VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        str(event_d),
-                        event_t.strftime("%H:%M"),
+                        str(event_s_date),
+                        str(event_e_date),
+                        event_s_time.strftime("%H:%M"),
+                        event_e_time.strftime("%H:%M"),
                         event_title,
                         event_pic,
                         event_desc,
@@ -415,24 +460,86 @@ elif menu == "📌 工作行事登記":
                 )
                 conn.commit()
                 conn.close()
-                st.success("工作行事已登記！")
+                st.success("工作行事已成功登記！")
                 st.rerun()
-            else:
-                st.warning("請填寫事項標題。")
 
     with col_e2:
-        st.subheader("📋 所有工作事項清單")
+        st.subheader("📋 工作行事清單")
         conn = sqlite3.connect(DB_NAME)
         df_w = pd.read_sql(
-            """SELECT event_date AS 日期, event_time AS 時間, 
+            """SELECT start_date AS 開始日期, end_date AS 結束日期, 
+                      start_time AS 開始時間, end_time AS 結束時間, 
                       person_in_charge AS 負責人, title AS 事項標題, description AS 說明 
-               FROM work_events ORDER BY event_date DESC""",
+               FROM work_events ORDER BY start_date DESC LIMIT 30""",
             conn,
         )
         conn.close()
         st.dataframe(df_w, width="stretch")
 
-# ==================== 模組 3: 影印輸出登記 ====================
+# ==================== 模組 3: 3C產品借用申請 ====================
+elif menu == "📱 3C產品借用申請":
+    st.header("📱 3C產品借用申請與狀況登記")
+    col_b1, col_b2 = st.columns([1, 2])
+
+    with col_b1:
+        st.subheader("借用登記表單")
+        borrow_item = st.selectbox("借用申請物品", DEVICES, key="borrow_item")
+        borrow_applicant = st.selectbox("申請人", EMPLOYEES, key="borrow_app")
+        borrow_date = st.date_input("借用日期", value=date.today(), key="borrow_d")
+
+        col_bt1, col_bt2 = st.columns(2)
+        with col_bt1:
+            borrow_s_time = st.time_input("借用開始時間", value=time(9, 0), key="borrow_st")
+        with col_bt2:
+            borrow_e_time = st.time_input("預計結束時間", value=time(17, 0), key="borrow_et")
+
+        borrow_condition = st.radio("借用狀況檢查", ["良好", "故障"], horizontal=True, key="borrow_cond")
+        
+        fault_description = ""
+        if borrow_condition == "故障":
+            fault_description = st.text_area("⚠️ 故障說明 (請具體描述異常情況)", placeholder="例如：螢幕出現閃爍條紋、無法開機或觸控失靈...")
+
+        if st.button("送出借用申請"):
+            if borrow_s_time >= borrow_e_time:
+                st.error("結束時間必須晚於開始時間！")
+            elif borrow_condition == "故障" and not fault_description.strip():
+                st.warning("狀況為故障時，請務必填寫故障說明以利維修登記！")
+            else:
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute(
+                    """INSERT INTO device_borrows (device_name, applicant, borrow_date, start_time, end_time, condition, fault_desc, created_at) 
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        borrow_item,
+                        borrow_applicant,
+                        str(borrow_date),
+                        borrow_s_time.strftime("%H:%M"),
+                        borrow_e_time.strftime("%H:%M"),
+                        borrow_condition,
+                        fault_description,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                conn.commit()
+                conn.close()
+                st.success(f"{borrow_applicant} 借用 {borrow_item} 登記成功！")
+                st.rerun()
+
+    with col_b2:
+        st.subheader("📋 3C借用歷程與設備狀況總覽")
+        conn = sqlite3.connect(DB_NAME)
+        df_borrows = pd.read_sql(
+            """SELECT borrow_date AS 借用日期, applicant AS 申請人, device_name AS 物品, 
+                      start_time || ' ~ ' || end_time AS 借用時段, condition AS 設備狀況, 
+                      fault_desc AS 故障說明 
+               FROM device_borrows ORDER BY id DESC LIMIT 30""",
+            conn,
+        )
+        conn.close()
+        st.dataframe(df_borrows, width="stretch")
+
+# ==================== 模組 4: 影印輸出登記 ====================
 elif menu == "🖨️ 影印輸出登記":
     st.header("🖨️ 影印輸出登記")
     with st.form("print_form"):
@@ -467,7 +574,7 @@ elif menu == "🖨️ 影印輸出登記":
     st.dataframe(df_prints, width="stretch")
     conn.close()
 
-# ==================== 模組 4: 物資出入庫管理 ====================
+# ==================== 模組 5: 物資出入庫管理 ====================
 elif menu == "📦 物資出入庫管理":
     st.header("📦 物資申請出庫與採購入庫")
     conn = sqlite3.connect(DB_NAME)
