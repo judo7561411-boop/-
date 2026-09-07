@@ -2,4 +2,5 @@ streamlit
 pandas
 streamlit-calendar
 openpyxl
-st-gsheets-connection
+gspread
+google-auth
