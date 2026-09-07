@@ -1,3 +1,4 @@
+import base64
 import calendar as py_calendar
 from datetime import date, datetime, time
 import io
@@ -24,39 +25,65 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    """解析 Secrets 憑證並建立 Google 試算表連線，雙軌相容字典與 JSON 字串"""
+    """解析 Secrets 憑證並建立 Google 試算表連線，全方位相容各類鍵值格式"""
     try:
         service_account_info = None
 
-        # 優先方案 A：直接讀取 [gcp_service_account] 字典
-        if "gcp_service_account" in st.secrets:
-            service_account_info = dict(st.secrets["gcp_service_account"])
-            if "private_key" in service_account_info:
-                pk = str(service_account_info["private_key"]).strip().strip("'").strip('"')
-                service_account_info["private_key"] = pk.replace("\\n", "\n")
+        # 1. 尋找 Base64 憑證鍵值
+        for b64_key in ["gcp_base64", "GCP_BASE64", "base64", "gcp_b64"]:
+            if b64_key in st.secrets:
+                raw = str(st.secrets[b64_key]).strip().strip('"').strip("'")
+                if len(raw) > 20:
+                    decoded = base64.b64decode(raw).decode("utf-8")
+                    service_account_info = json.loads(decoded)
+                    break
 
-        # 備用方案 B：讀取 gcp_json 字串
-        elif "gcp_json" in st.secrets:
-            raw_str = st.secrets["gcp_json"]
-            if raw_str and len(str(raw_str).strip()) > 10:
-                cleaned_str = str(raw_str).strip().strip("'''").strip('"""')
-                service_account_info = json.loads(cleaned_str)
-
+        # 2. 尋找 TOML 字典憑證
         if not service_account_info:
-            st.error("⚠️ 未在 Streamlit Secrets 中找到有效的 Google 服務帳戶憑證設定！")
+            for dict_key in ["gcp_service_account", "GCP_SERVICE_ACCOUNT"]:
+                if dict_key in st.secrets:
+                    service_account_info = dict(st.secrets[dict_key])
+                    if "private_key" in service_account_info:
+                        pk = str(service_account_info["private_key"]).strip().strip("'").strip('"')
+                        service_account_info["private_key"] = pk.replace("\\n", "\n")
+                    break
+
+        # 3. 尋找 JSON 字串憑證
+        if not service_account_info:
+            for json_key in ["gcp_json", "GCP_JSON"]:
+                if json_key in st.secrets:
+                    raw_str = str(st.secrets[json_key]).strip().strip("'''").strip('"""')
+                    if len(raw_str) > 20:
+                        service_account_info = json.loads(raw_str)
+                        break
+
+        # 驗證憑證是否成功提取
+        if not service_account_info:
+            existing_keys = list(st.secrets.keys()) if hasattr(st, "secrets") else []
+            st.error(f"⚠️ 未在 Streamlit Secrets 中找到有效的憑證！目前後台偵測到的 Secrets 鍵值為：{existing_keys}")
+            return None
+
+        # 尋找試算表網址
+        spreadsheet_url = None
+        for url_key in ["spreadsheet_url", "SPREADSHEET_URL", "sheet_url"]:
+            if url_key in st.secrets:
+                spreadsheet_url = str(st.secrets[url_key]).strip().strip('"').strip("'")
+                break
+
+        if not spreadsheet_url:
+            st.error("⚠️ Streamlit Secrets 中缺少 spreadsheet_url 設定！")
             return None
 
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         client = gspread.authorize(creds)
-        spreadsheet_url = st.secrets["spreadsheet_url"]
         sheet = client.open_by_url(spreadsheet_url)
         return sheet
     except Exception as e:
-        st.error(f"Google 試算表連線失敗，請檢查憑證或共用權限設定：{e}")
+        st.error(f"Google 試算表連線失敗，請檢查憑證內容或試算表共用權限：{e}")
         return None
 
 def get_worksheet(sheet_name: str, default_cols: list):
-    """安全獲取指定工作表，若不存在則自動新增並寫入標題欄位"""
+    """安全獲取指定工作表，若不存在則自動新增並寫入欄位名稱"""
     sh = get_gspread_client()
     if not sh:
         return None
@@ -71,7 +98,7 @@ def get_worksheet(sheet_name: str, default_cols: list):
     return ws
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """安全載入工作表資料為 DataFrame"""
+    """載入工作表資料為 DataFrame"""
     ws = get_worksheet(sheet_name, default_cols)
     if not ws:
         return pd.DataFrame(columns=default_cols)
@@ -88,7 +115,7 @@ def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
         return pd.DataFrame(columns=default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """將 DataFrame 全量同步回 Google 試算表"""
+    """全量更新 DataFrame 至 Google 試算表"""
     ws = get_worksheet(sheet_name, df.columns.tolist())
     if not ws:
         return
@@ -101,7 +128,7 @@ def save_data(sheet_name: str, df: pd.DataFrame):
         st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
 
 def ensure_supplies_setup():
-    """確保物資品項預載齊全"""
+    """初始化預設庫存項目"""
     df = load_data("supplies", ["item_name", "stock"])
     if df.empty or len(df) == 0:
         new_df = pd.DataFrame([{"item_name": item, "stock": "0"} for item in DEFAULT_SUPPLIES])
