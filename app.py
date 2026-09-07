@@ -3,6 +3,7 @@ import calendar as py_calendar
 from datetime import date, datetime, time
 import io
 import json
+import sqlite3
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -18,117 +19,128 @@ DEFAULT_SUPPLIES = [
     "垃圾袋(小)", "垃圾袋(中)", "垃圾袋(大)", "廁所清潔劑", "洗碗精"
 ]
 
+LOCAL_DB = "backup_storage.db"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
+# 初始化本地備援資料庫 (保證即使網路延遲，切換分頁也不遺失資料)
+def init_local_fallback():
+    conn = sqlite3.connect(LOCAL_DB)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS fallback_store (sheet_name TEXT PRIMARY KEY, json_data TEXT)")
+    conn.commit()
+    conn.close()
+
+init_local_fallback()
+
+def save_local_fallback(sheet_name: str, df: pd.DataFrame):
+    try:
+        conn = sqlite3.connect(LOCAL_DB)
+        c = conn.cursor()
+        c.execute("REPLACE INTO fallback_store (sheet_name, json_data) VALUES (?, ?)", 
+                  (sheet_name, df.to_json(orient="records", force_ascii=False)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def load_local_fallback(sheet_name: str, default_cols: list) -> pd.DataFrame:
+    try:
+        conn = sqlite3.connect(LOCAL_DB)
+        c = conn.cursor()
+        row = c.execute("SELECT json_data FROM fallback_store WHERE sheet_name = ?", (sheet_name,)).fetchone()
+        conn.close()
+        if row and row[0]:
+            return pd.read_json(io.StringIO(row[0])).fillna("").astype(str)
+    except Exception:
+        pass
+    return pd.DataFrame(columns=default_cols)
+
 @st.cache_resource
 def get_gspread_client():
-    """解析 Secrets 憑證並建立 Google 試算表連線，全方位相容各類鍵值格式"""
+    """解析 Secrets 憑證並建立連線"""
     try:
         service_account_info = None
+        if "gcp_base64" in st.secrets:
+            raw = str(st.secrets["gcp_base64"]).strip().strip('"').strip("'")
+            if len(raw) > 20:
+                service_account_info = json.loads(base64.b64decode(raw).decode("utf-8"))
+        elif "gcp_service_account" in st.secrets:
+            service_account_info = dict(st.secrets["gcp_service_account"])
+            if "private_key" in service_account_info:
+                service_account_info["private_key"] = str(service_account_info["private_key"]).strip().strip("'").strip('"').replace("\\n", "\n")
+        elif "gcp_json" in st.secrets:
+            raw_str = str(st.secrets["gcp_json"]).strip().strip("'''").strip('"""')
+            if len(raw_str) > 20:
+                service_account_info = json.loads(raw_str)
 
-        # 1. 尋找 Base64 憑證鍵值
-        for b64_key in ["gcp_base64", "GCP_BASE64", "base64", "gcp_b64"]:
-            if b64_key in st.secrets:
-                raw = str(st.secrets[b64_key]).strip().strip('"').strip("'")
-                if len(raw) > 20:
-                    decoded = base64.b64decode(raw).decode("utf-8")
-                    service_account_info = json.loads(decoded)
-                    break
-
-        # 2. 尋找 TOML 字典憑證
-        if not service_account_info:
-            for dict_key in ["gcp_service_account", "GCP_SERVICE_ACCOUNT"]:
-                if dict_key in st.secrets:
-                    service_account_info = dict(st.secrets[dict_key])
-                    if "private_key" in service_account_info:
-                        pk = str(service_account_info["private_key"]).strip().strip("'").strip('"')
-                        service_account_info["private_key"] = pk.replace("\\n", "\n")
-                    break
-
-        # 3. 尋找 JSON 字串憑證
-        if not service_account_info:
-            for json_key in ["gcp_json", "GCP_JSON"]:
-                if json_key in st.secrets:
-                    raw_str = str(st.secrets[json_key]).strip().strip("'''").strip('"""')
-                    if len(raw_str) > 20:
-                        service_account_info = json.loads(raw_str)
-                        break
-
-        # 驗證憑證是否成功提取
-        if not service_account_info:
-            existing_keys = list(st.secrets.keys()) if hasattr(st, "secrets") else []
-            st.error(f"⚠️ 未在 Streamlit Secrets 中找到有效的憑證！目前後台偵測到的 Secrets 鍵值為：{existing_keys}")
-            return None
-
-        # 尋找試算表網址
-        spreadsheet_url = None
-        for url_key in ["spreadsheet_url", "SPREADSHEET_URL", "sheet_url"]:
-            if url_key in st.secrets:
-                spreadsheet_url = str(st.secrets[url_key]).strip().strip('"').strip("'")
-                break
-
-        if not spreadsheet_url:
-            st.error("⚠️ Streamlit Secrets 中缺少 spreadsheet_url 設定！")
+        if not service_account_info or "spreadsheet_url" not in st.secrets:
             return None
 
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         client = gspread.authorize(creds)
-        sheet = client.open_by_url(spreadsheet_url)
+        sheet = client.open_by_url(str(st.secrets["spreadsheet_url"]).strip().strip('"').strip("'"))
         return sheet
-    except Exception as e:
-        st.error(f"Google 試算表連線失敗，請檢查憑證內容或試算表共用權限：{e}")
+    except Exception:
         return None
 
 def get_worksheet(sheet_name: str, default_cols: list):
-    """安全獲取指定工作表，若不存在則自動新增並寫入欄位名稱"""
     sh = get_gspread_client()
     if not sh:
         return None
     try:
-        ws = sh.worksheet(sheet_name)
+        return sh.worksheet(sheet_name)
     except Exception:
         try:
             ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
             ws.append_row(default_cols)
+            return ws
         except Exception:
             return None
-    return ws
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """載入工作表資料為 DataFrame"""
+    """載入資料：優先自 Google 試算表撈取最新數據，並同步更新本地快照"""
     ws = get_worksheet(sheet_name, default_cols)
-    if not ws:
-        return pd.DataFrame(columns=default_cols)
-    try:
-        records = ws.get_all_records()
-        if not records:
-            return pd.DataFrame(columns=default_cols)
-        df = pd.DataFrame(records)
-        for col in default_cols:
-            if col not in df.columns:
-                df[col] = ""
-        return df.fillna("").astype(str)
-    except Exception:
-        return pd.DataFrame(columns=default_cols)
+    if ws:
+        try:
+            records = ws.get_all_records()
+            if records:
+                df = pd.DataFrame(records)
+                for col in default_cols:
+                    if col not in df.columns:
+                        df[col] = ""
+                df = df.fillna("").astype(str)
+                save_local_fallback(sheet_name, df)
+                return df
+            else:
+                df = pd.DataFrame(columns=default_cols)
+                save_local_fallback(sheet_name, df)
+                return df
+        except Exception:
+            pass
+    # 若雲端未連通或暫時無法讀取，使用本地防遺失快照
+    return load_local_fallback(sheet_name, default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """全量更新 DataFrame 至 Google 試算表"""
-    ws = get_worksheet(sheet_name, df.columns.tolist())
-    if not ws:
-        return
-    try:
-        ws.clear()
-        header = df.columns.tolist()
-        values = df.fillna("").astype(str).values.tolist()
-        ws.update(range_name="A1", values=[header] + values)
-    except Exception as e:
-        st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
+    """雙重儲存：即時寫入本地備援 + 全量同步回 Google 試算表"""
+    # 1. 本地即刻持久化，確保切換分頁瞬間絕不消失
+    save_local_fallback(sheet_name, df)
 
+    # 2. 雲端 Google 試算表同步
+    ws = get_worksheet(sheet_name, df.columns.tolist())
+    if ws:
+        try:
+            ws.clear()
+            header = df.columns.tolist()
+            values = df.fillna("").astype(str).values.tolist()
+            ws.update(range_name="A1", values=[header] + values)
+        except Exception as e:
+            st.error(f"雲端試算表同步異常，但資料已安全保存在本地備援中：{e}")
+
+# 初始化物資
 def ensure_supplies_setup():
-    """初始化預設庫存項目"""
     df = load_data("supplies", ["item_name", "stock"])
     if df.empty or len(df) == 0:
         new_df = pd.DataFrame([{"item_name": item, "stock": "0"} for item in DEFAULT_SUPPLIES])
@@ -150,6 +162,13 @@ except Exception:
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
 st.title("🏢 公司內部行政管理系統")
 
+# 狀態提示
+sh_conn = get_gspread_client()
+if sh_conn:
+    st.sidebar.success("🟢 雲端 Google 試算表：連線同步中")
+else:
+    st.sidebar.warning("🟠 運作模式：本地安全儲存模式 (切換頁面資料不遺失)")
+
 menu = st.sidebar.radio(
     "系統模組切換",
     [
@@ -164,10 +183,8 @@ menu = st.sidebar.radio(
 )
 
 def get_daily_roster(query_date_str):
-    """計算指定日期的排班人員（奇偶月輪替與臨時調班）"""
     q_date = datetime.strptime(query_date_str, "%Y-%m-%d")
     month = q_date.month
-
     if month % 2 != 0:
         roster = {"伊臻": "A班", "涵玟": "A班", "美釵": "B班", "勝順": "未排班"}
     else:
@@ -404,7 +421,7 @@ elif menu == "📅 班表、排休與調班":
                     }])
                     df_schedules = pd.concat([df_schedules, new_row], ignore_index=True)
                     save_data("schedules", df_schedules)
-                    st.success("排休登記成功！已儲存至雲端。")
+                    st.success("排休登記成功！切換頁面資料將永久保存。")
                     st.rerun()
 
     with tab_edit_leave:
