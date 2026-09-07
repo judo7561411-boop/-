@@ -19,35 +19,67 @@ DEFAULT_SUPPLIES = [
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """安全載入指定工作表資料，若空白則初始化預設欄位"""
+    """安全載入指定工作表資料，若不存在或為空則自動初始化"""
     try:
-        df = conn.read(worksheet=sheet_name, ttl="0s")
+        df = conn.read(worksheet=sheet_name, ttl=0)
         if df is None or df.empty:
-            return pd.DataFrame(columns=default_cols)
-        return df
+            df = pd.DataFrame(columns=default_cols)
+            save_data(sheet_name, df)
+            return df
+        # 確保所有必要欄位皆存在
+        for col in default_cols:
+            if col not in df.columns:
+                df[col] = ""
+        return df.fillna("")
     except Exception:
-        return pd.DataFrame(columns=default_cols)
+        df = pd.DataFrame(columns=default_cols)
+        try:
+            save_data(sheet_name, df)
+        except Exception:
+            pass
+        return df
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """將 DataFrame 更新回 Google 試算表"""
-    conn.update(worksheet=sheet_name, data=df)
+    """安全寫入資料回 Google Sheets，避免 UnsupportedOperationError"""
+    try:
+        # 清理字串避免 JSON 序列化失敗
+        df_to_save = df.copy().astype(str)
+        conn.update(worksheet=sheet_name, data=df_to_save)
+    except Exception:
+        # 當使用標準 update 失敗時，透過底層 gspread 客戶端強制同步
+        try:
+            gc = conn._instance
+            spreadsheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+            sh = gc.open_by_url(spreadsheet_url)
+            try:
+                ws = sh.worksheet(sheet_name)
+            except Exception:
+                ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
+            ws.clear()
+            header = df.columns.tolist()
+            values = df.fillna("").values.tolist()
+            ws.update(range_name="A1", values=[header] + values)
+        except Exception as e:
+            st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
 
-def init_sheets():
-    """初始化各工作表預設資料"""
-    df_supplies = load_data("supplies", ["item_name", "stock"])
-    if df_supplies.empty:
-        df_supplies = pd.DataFrame([{"item_name": item, "stock": 0} for item in DEFAULT_SUPPLIES])
-        save_data("supplies", df_supplies)
+# 初始化物資預設庫存
+def ensure_supplies_setup():
+    df = load_data("supplies", ["item_name", "stock"])
+    if df.empty or len(df) == 0:
+        new_df = pd.DataFrame([{"item_name": item, "stock": "0"} for item in DEFAULT_SUPPLIES])
+        save_data("supplies", new_df)
     else:
-        # 補齊可能缺失的預設品項
-        existing_items = df_supplies["item_name"].tolist()
-        missing = [item for item in DEFAULT_SUPPLIES if item not in existing_items]
+        existing = df["item_name"].astype(str).tolist()
+        missing = [item for item in DEFAULT_SUPPLIES if item not in existing]
         if missing:
-            new_rows = pd.DataFrame([{"item_name": m, "stock": 0} for m in missing])
-            df_supplies = pd.concat([df_supplies, new_rows], ignore_index=True)
-            save_data("supplies", df_supplies)
+            add_df = pd.DataFrame([{"item_name": m, "stock": "0"} for m in missing])
+            merged = pd.concat([df, add_df], ignore_index=True)
+            save_data("supplies", merged)
 
-init_sheets()
+try:
+    ensure_supplies_setup()
+except Exception:
+    pass
 
 # 頁面基本配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
@@ -78,9 +110,9 @@ def get_daily_roster(query_date_str):
 
     df_swaps = load_data("shift_swaps", ["swap_date", "employee_name", "assigned_shift", "reason"])
     if not df_swaps.empty:
-        swaps = df_swaps[df_swaps["swap_date"].astype(str) == query_date_str]
+        swaps = df_swaps[df_swaps["swap_date"].astype(str) == str(query_date_str)]
         for _, row in swaps.iterrows():
-            roster[row["employee_name"]] = row["assigned_shift"]
+            roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
 # ==================== 模組 0: 互動月曆視圖 ====================
@@ -94,8 +126,10 @@ if menu == "🗓️ 互動月曆視圖":
     calendar_events = []
 
     for _, row in df_schedules.iterrows():
-        s_date = str(row["start_date"]) if pd.notna(row["start_date"]) and row["start_date"] else str(date.today())
-        e_date = str(row["end_date"]) if pd.notna(row["end_date"]) and row["end_date"] else s_date
+        if not str(row["employee_name"]).strip():
+            continue
+        s_date = str(row["start_date"]).strip() if str(row["start_date"]).strip() else str(date.today())
+        e_date = str(row["end_date"]).strip() if str(row["end_date"]).strip() else s_date
         calendar_events.append({
             "title": f"🏖️ {row['employee_name']} [{row['leave_type']}]",
             "start": s_date,
@@ -109,15 +143,17 @@ if menu == "🗓️ 互動月曆視圖":
                 "項目": f"{row['leave_type']}假",
                 "日期區間": f"{s_date} ~ {e_date}",
                 "時間明細": f"{row['start_datetime']} 至 {row['end_datetime']}",
-                "詳細內容/備註": str(row["note"]) if pd.notna(row["note"]) and row["note"] else "無填寫備註",
+                "詳細內容/備註": str(row["note"]) if str(row["note"]).strip() else "無填寫備註",
             },
         })
 
     for _, row in df_works.iterrows():
-        s_d = str(row["start_date"]) if pd.notna(row["start_date"]) and row["start_date"] else str(date.today())
-        e_d = str(row["end_date"]) if pd.notna(row["end_date"]) and row["end_date"] else s_d
-        s_t = str(row["start_time"]) if pd.notna(row["start_time"]) and row["start_time"] else "09:00"
-        e_t = str(row["end_time"]) if pd.notna(row["end_time"]) and row["end_time"] else "10:00"
+        if not str(row["title"]).strip():
+            continue
+        s_d = str(row["start_date"]).strip() if str(row["start_date"]).strip() else str(date.today())
+        e_d = str(row["end_date"]).strip() if str(row["end_date"]).strip() else s_d
+        s_t = str(row["start_time"]).strip() if str(row["start_time"]).strip() else "09:00"
+        e_t = str(row["end_time"]).strip() if str(row["end_time"]).strip() else "10:00"
 
         calendar_events.append({
             "title": f"💼 {s_t} [{row['person_in_charge']}] {row['title']}",
@@ -132,7 +168,7 @@ if menu == "🗓️ 互動月曆視圖":
                 "項目": str(row["title"]),
                 "日期區間": f"{s_d} 至 {e_d}" if s_d != e_d else s_d,
                 "時間明細": f"{s_t} ~ {e_t}",
-                "詳細內容/備註": str(row["description"]) if pd.notna(row["description"]) and row["description"] else "無詳細說明",
+                "詳細內容/備註": str(row["description"]) if str(row["description"]).strip() else "無詳細說明",
             },
         })
 
@@ -203,7 +239,7 @@ elif menu == "📤 匯出每月班表與行事":
             shift_info = daily_shifts.get(emp, "未排班")
             if not df_schedules.empty:
                 emp_leaves = df_schedules[
-                    (df_schedules["employee_name"] == emp) &
+                    (df_schedules["employee_name"].astype(str) == emp) &
                     (df_schedules["start_date"].astype(str) <= cur_d_str) &
                     (df_schedules["end_date"].astype(str) >= cur_d_str)
                 ]
@@ -217,8 +253,8 @@ elif menu == "📤 匯出每月班表與行事":
         roster_rows.append(row)
 
     df_month_roster = pd.DataFrame(roster_rows)
-
     df_works = load_data("work_events", ["start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
+
     if not df_works.empty:
         df_month_events = df_works[
             (df_works["start_date"].astype(str) <= f"{month_str}-{num_days:02d}") &
@@ -285,7 +321,7 @@ elif menu == "📅 班表、排休與調班":
                 conflict = False
                 if not df_schedules.empty:
                     c_rows = df_schedules[
-                        (df_schedules["employee_name"] != emp) &
+                        (df_schedules["employee_name"].astype(str) != emp) &
                         ~((df_schedules["end_date"].astype(str) < str(s_date)) | (df_schedules["start_date"].astype(str) > str(e_date)))
                     ]
                     if not c_rows.empty:
@@ -294,49 +330,59 @@ elif menu == "📅 班表、排休與調班":
                         st.error(f"⚠️ 無法登記！當日已有同仁排休：{conflict_info}。依規定每日僅限 1 人排休。")
 
                 if not conflict:
-                    new_id = int(df_schedules["id"].max() + 1) if not df_schedules.empty and pd.notna(df_schedules["id"].max()) else 1
+                    valid_ids = pd.to_numeric(df_schedules["id"], errors="coerce").dropna()
+                    new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
                     new_row = pd.DataFrame([{
-                        "id": new_id, "employee_name": emp, "leave_type": l_type,
+                        "id": str(new_id), "employee_name": emp, "leave_type": l_type,
                         "start_datetime": start_dt_str, "end_datetime": end_dt_str,
-                        "start_date": str(s_date), "end_date": str(e_date), "note": l_note
+                        "start_date": str(s_date), "end_date": str(e_date), "note": str(l_note)
                     }])
                     df_schedules = pd.concat([df_schedules, new_row], ignore_index=True)
                     save_data("schedules", df_schedules)
-                    st.success("排休登記成功！已永久寫入雲端。")
+                    st.success("排休登記成功！已儲存至雲端。")
                     st.rerun()
 
     with tab_edit_leave:
         st.subheader("✏️ 修改或更新排休紀錄")
         df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_date", "end_date", "note"])
-        if not df_schedules.empty:
+        if not df_schedules.empty and len(df_schedules) > 0:
             record_options = {
-                f"編號 {r['id']} | {r['employee_name']} - {r['leave_type']} ({r['start_date']} ~ {r['end_date']})": r['id']
-                for _, r in df_schedules.iterrows()
+                f"編號 {r['id']} | {r['employee_name']} - {r['leave_type']} ({r['start_date']} ~ {r['end_date']})": str(r['id'])
+                for _, r in df_schedules.iterrows() if str(r['employee_name']).strip()
             }
-            selected_label = st.selectbox("請選擇欲修改的排休紀錄", list(record_options.keys()))
-            target_id = record_options[selected_label]
-            curr = df_schedules[df_schedules["id"] == target_id].iloc[0]
+            if record_options:
+                selected_label = st.selectbox("請選擇欲修改的排休紀錄", list(record_options.keys()))
+                target_id = record_options[selected_label]
+                curr = df_schedules[df_schedules["id"].astype(str) == target_id].iloc[0]
 
-            c_e1, c_e2 = st.columns(2)
-            with c_e1:
-                edit_emp = st.selectbox("請假同仁", EMPLOYEES, index=EMPLOYEES.index(curr["employee_name"]), key="ed_l_emp")
-                edit_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], index=["特休", "補休", "公假", "公出", "事假", "病假"].index(curr["leave_type"]), key="ed_l_type")
-                cur_sd = datetime.strptime(str(curr["start_date"]), "%Y-%m-%d").date() if pd.notna(curr["start_date"]) else date.today()
-                edit_sd = st.date_input("開始休假日期", value=cur_sd, key="ed_l_sd")
-            with c_e2:
-                cur_ed = datetime.strptime(str(curr["end_date"]), "%Y-%m-%d").date() if pd.notna(curr["end_date"]) else edit_sd
-                edit_ed = st.date_input("結束休假日期", value=cur_ed, min_value=edit_sd, key="ed_l_ed")
-                edit_note = st.text_input("原因備註", value=str(curr["note"]) if pd.notna(curr["note"]) else "", key="ed_l_note")
+                c_e1, c_e2 = st.columns(2)
+                with c_e1:
+                    edit_emp = st.selectbox("請假同仁", EMPLOYEES, index=EMPLOYEES.index(curr["employee_name"]) if curr["employee_name"] in EMPLOYEES else 0, key="ed_l_emp")
+                    edit_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], index=["特休", "補休", "公假", "公出", "事假", "病假"].index(curr["leave_type"]) if curr["leave_type"] in ["特休", "補休", "公假", "公出", "事假", "病假"] else 0, key="ed_l_type")
+                    try:
+                        cur_sd = datetime.strptime(str(curr["start_date"]).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_sd = date.today()
+                    edit_sd = st.date_input("開始休假日期", value=cur_sd, key="ed_l_sd")
+                with c_e2:
+                    try:
+                        cur_ed = datetime.strptime(str(curr["end_date"]).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_ed = edit_sd
+                    edit_ed = st.date_input("結束休假日期", value=cur_ed, min_value=edit_sd, key="ed_l_ed")
+                    edit_note = st.text_input("原因備註", value=str(curr["note"]), key="ed_l_note")
 
-            if st.button("確認儲存修改", key="btn_save_edit_leave"):
-                s_dt = f"{edit_sd} 08:00"
-                e_dt = f"{edit_ed} 17:00"
-                df_schedules.loc[df_schedules["id"] == target_id, ["employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"]] = [
-                    edit_emp, edit_type, str(edit_sd), str(edit_ed), s_dt, e_dt, edit_note
-                ]
-                save_data("schedules", df_schedules)
-                st.success("排休資料已成功修改！")
-                st.rerun()
+                if st.button("確認儲存修改", key="btn_save_edit_leave"):
+                    s_dt = f"{edit_sd} 08:00"
+                    e_dt = f"{edit_ed} 17:00"
+                    df_schedules.loc[df_schedules["id"].astype(str) == target_id, ["employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"]] = [
+                        edit_emp, edit_type, str(edit_sd), str(edit_ed), s_dt, e_dt, str(edit_note)
+                    ]
+                    save_data("schedules", df_schedules)
+                    st.success("排休資料已成功修改！")
+                    st.rerun()
+            else:
+                st.info("目前尚無有效的排休紀錄可供修改。")
         else:
             st.info("目前尚無任何排休紀錄可供修改。")
 
@@ -353,8 +399,8 @@ elif menu == "📅 班表、排休與調班":
         if st.button("確認調班"):
             df_swaps = load_data("shift_swaps", ["swap_date", "employee_name", "assigned_shift", "reason"])
             if not df_swaps.empty:
-                df_swaps = df_swaps[~((df_swaps["swap_date"].astype(str) == str(swap_d)) & (df_swaps["employee_name"] == swap_emp))]
-            new_swap = pd.DataFrame([{"swap_date": str(swap_d), "employee_name": swap_emp, "assigned_shift": new_shift.split(" ")[0], "reason": swap_reason}])
+                df_swaps = df_swaps[~((df_swaps["swap_date"].astype(str) == str(swap_d)) & (df_swaps["employee_name"].astype(str) == str(swap_emp)))]
+            new_swap = pd.DataFrame([{"swap_date": str(swap_d), "employee_name": str(swap_emp), "assigned_shift": str(new_shift.split(" ")[0]), "reason": str(swap_reason)}])
             df_swaps = pd.concat([df_swaps, new_swap], ignore_index=True)
             save_data("shift_swaps", df_swaps)
             st.success(f"{swap_d} {swap_emp} 已成功調整為 {new_shift.split(' ')[0]}！")
@@ -395,17 +441,18 @@ elif menu == "📌 工作行事登記":
             event_desc = st.text_area("內容說明 (選填)", key="we_desc")
 
             if st.button("新增工作行事"):
-                if not event_title:
+                if not event_title.strip():
                     st.warning("請填寫活動/事項標題。")
                 elif event_s_date == event_e_date and event_s_time >= event_e_time:
                     st.error("同一天活動的結束時間必須晚於開始時間！")
                 else:
                     df_w = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description"])
-                    new_id = int(df_w["id"].max() + 1) if not df_w.empty and pd.notna(df_w["id"].max()) else 1
+                    valid_ids = pd.to_numeric(df_w["id"], errors="coerce").dropna()
+                    new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
                     new_row = pd.DataFrame([{
-                        "id": new_id, "start_date": str(event_s_date), "end_date": str(event_e_date),
+                        "id": str(new_id), "start_date": str(event_s_date), "end_date": str(event_e_date),
                         "start_time": event_s_time.strftime("%H:%M"), "end_time": event_e_time.strftime("%H:%M"),
-                        "title": event_title, "person_in_charge": event_pic, "description": event_desc
+                        "title": str(event_title), "person_in_charge": str(event_pic), "description": str(event_desc)
                     }])
                     df_w = pd.concat([df_w, new_row], ignore_index=True)
                     save_data("work_events", df_w)
@@ -418,34 +465,52 @@ elif menu == "📌 工作行事登記":
 
     with tab_act_edit:
         df_w = load_data("work_events", ["id", "title", "start_date", "end_date", "start_time", "end_time", "person_in_charge", "description"])
-        if not df_w.empty:
-            w_options = {f"編號 {r['id']} | [{r['person_in_charge']}] {r['title']} ({r['start_date']})": r['id'] for _, r in df_w.iterrows()}
-            w_choice = st.selectbox("選擇欲修改的事項", list(w_options.keys()))
-            target_w_id = w_options[w_choice]
-            w_curr = df_w[df_w["id"] == target_w_id].iloc[0]
+        if not df_w.empty and len(df_w) > 0:
+            w_options = {
+                f"編號 {r['id']} | [{r['person_in_charge']}] {r['title']} ({r['start_date']})": str(r['id'])
+                for _, r in df_w.iterrows() if str(r['title']).strip()
+            }
+            if w_options:
+                w_choice = st.selectbox("選擇欲修改的事項", list(w_options.keys()))
+                target_w_id = w_options[w_choice]
+                w_curr = df_w[df_w["id"].astype(str) == target_w_id].iloc[0]
 
-            ew_col1, ew_col2 = st.columns(2)
-            with ew_col1:
-                new_w_title = st.text_input("活動/事項標題", value=w_curr["title"], key="ew_title")
-                new_w_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, index=EVENT_RESPONSIBLES.index(w_curr["person_in_charge"]), key="ew_pic")
-                cur_wsd = datetime.strptime(str(w_curr["start_date"]), "%Y-%m-%d").date() if pd.notna(w_curr["start_date"]) else date.today()
-                new_w_sd = st.date_input("開始日期", value=cur_wsd, key="ew_sd")
-                cur_wst = datetime.strptime(str(w_curr["start_time"]), "%H:%M").time() if pd.notna(w_curr["start_time"]) else time(9, 0)
-                new_w_st = st.time_input("開始時間", value=cur_wst, key="ew_st")
-            with ew_col2:
-                cur_wed = datetime.strptime(str(w_curr["end_date"]), "%Y-%m-%d").date() if pd.notna(w_curr["end_date"]) else new_w_sd
-                new_w_ed = st.date_input("結束日期", value=cur_wed, min_value=new_w_sd, key="ew_ed")
-                cur_wet = datetime.strptime(str(w_curr["end_time"]), "%H:%M").time() if pd.notna(w_curr["end_time"]) else time(10, 0)
-                new_w_et = st.time_input("結束時間", value=cur_wet, key="ew_et")
-                new_w_desc = st.text_area("內容說明", value=str(w_curr["description"]) if pd.notna(w_curr["description"]) else "", key="ew_desc")
+                ew_col1, ew_col2 = st.columns(2)
+                with ew_col1:
+                    new_w_title = st.text_input("活動/事項標題", value=str(w_curr["title"]), key="ew_title")
+                    new_w_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, index=EVENT_RESPONSIBLES.index(w_curr["person_in_charge"]) if w_curr["person_in_charge"] in EVENT_RESPONSIBLES else 0, key="ew_pic")
+                    try:
+                        cur_wsd = datetime.strptime(str(w_curr["start_date"]).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_wsd = date.today()
+                    new_w_sd = st.date_input("開始日期", value=cur_wsd, key="ew_sd")
+                    try:
+                        cur_wst = datetime.strptime(str(w_curr["start_time"]).strip(), "%H:%M").time()
+                    except Exception:
+                        cur_wst = time(9, 0)
+                    new_w_st = st.time_input("開始時間", value=cur_wst, key="ew_st")
+                with ew_col2:
+                    try:
+                        cur_wed = datetime.strptime(str(w_curr["end_date"]).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_wed = new_w_sd
+                    new_w_ed = st.date_input("結束日期", value=cur_wed, min_value=new_w_sd, key="ew_ed")
+                    try:
+                        cur_wet = datetime.strptime(str(w_curr["end_time"]).strip(), "%H:%M").time()
+                    except Exception:
+                        cur_wet = time(10, 0)
+                    new_w_et = st.time_input("結束時間", value=cur_wet, key="ew_et")
+                    new_w_desc = st.text_area("內容說明", value=str(w_curr["description"]), key="ew_desc")
 
-            if st.button("儲存行事修改", key="btn_save_edit_work"):
-                df_w.loc[df_w["id"] == target_w_id, ["title", "person_in_charge", "start_date", "end_date", "start_time", "end_time", "description"]] = [
-                    new_w_title, new_w_pic, str(new_w_sd), str(new_w_ed), new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"), new_w_desc
-                ]
-                save_data("work_events", df_w)
-                st.success("工作行事已成功更新！")
-                st.rerun()
+                if st.button("儲存行事修改", key="btn_save_edit_work"):
+                    df_w.loc[df_w["id"].astype(str) == target_w_id, ["title", "person_in_charge", "start_date", "end_date", "start_time", "end_time", "description"]] = [
+                        str(new_w_title), str(new_w_pic), str(new_w_sd), str(new_w_ed), new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"), str(new_w_desc)
+                    ]
+                    save_data("work_events", df_w)
+                    st.success("工作行事已成功更新！")
+                    st.rerun()
+            else:
+                st.info("目前尚無有效的工作行事可供修改。")
         else:
             st.info("目前尚無工作行事可供修改。")
 
@@ -476,12 +541,13 @@ elif menu == "📱 3C產品借用申請":
                     st.warning("狀況為故障時，請務必填寫故障說明！")
                 else:
                     df_b = load_data("device_borrows", ["id", "device_name", "applicant", "borrow_date", "start_time", "end_time", "condition", "fault_desc", "created_at"])
-                    new_id = int(df_b["id"].max() + 1) if not df_b.empty and pd.notna(df_b["id"].max()) else 1
+                    valid_ids = pd.to_numeric(df_b["id"], errors="coerce").dropna()
+                    new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
                     new_row = pd.DataFrame([{
-                        "id": new_id, "device_name": borrow_item, "applicant": borrow_applicant,
+                        "id": str(new_id), "device_name": borrow_item, "applicant": borrow_applicant,
                         "borrow_date": str(borrow_date), "start_time": borrow_s_time.strftime("%H:%M"),
                         "end_time": borrow_e_time.strftime("%H:%M"), "condition": borrow_condition,
-                        "fault_desc": fault_description, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        "fault_desc": str(fault_description), "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }])
                     df_b = pd.concat([df_b, new_row], ignore_index=True)
                     save_data("device_borrows", df_b)
@@ -494,33 +560,48 @@ elif menu == "📱 3C產品借用申請":
 
     with tab_dev_edit:
         df_b = load_data("device_borrows", ["id", "device_name", "applicant", "borrow_date", "start_time", "end_time", "condition", "fault_desc"])
-        if not df_b.empty:
-            b_opts = {f"編號 {r['id']} | {r['applicant']} 借用 {r['device_name']} ({r['borrow_date']})": r['id'] for _, r in df_b.iterrows()}
-            b_choice = st.selectbox("請選擇欲修改的借用紀錄", list(b_opts.keys()))
-            target_b_id = b_opts[b_choice]
-            b_curr = df_b[df_b["id"] == target_b_id].iloc[0]
+        if not df_b.empty and len(df_b) > 0:
+            b_opts = {
+                f"編號 {r['id']} | {r['applicant']} 借用 {r['device_name']} ({r['borrow_date']})": str(r['id'])
+                for _, r in df_b.iterrows() if str(r['applicant']).strip()
+            }
+            if b_opts:
+                b_choice = st.selectbox("請選擇欲修改的借用紀錄", list(b_opts.keys()))
+                target_b_id = b_opts[b_choice]
+                b_curr = df_b[df_b["id"].astype(str) == target_b_id].iloc[0]
 
-            eb_col1, eb_col2 = st.columns(2)
-            with eb_col1:
-                ed_item = st.selectbox("借用物品", DEVICES, index=DEVICES.index(b_curr["device_name"]), key="ed_b_item")
-                ed_app = st.selectbox("申請同仁", EMPLOYEES, index=EMPLOYEES.index(b_curr["applicant"]), key="ed_b_app")
-                cur_bd = datetime.strptime(str(b_curr["borrow_date"]), "%Y-%m-%d").date() if pd.notna(b_curr["borrow_date"]) else date.today()
-                ed_bd = st.date_input("借用日期", value=cur_bd, key="ed_b_date")
-            with eb_col2:
-                cur_st = datetime.strptime(str(b_curr["start_time"]), "%H:%M").time() if pd.notna(b_curr["start_time"]) else time(9, 0)
-                ed_st = st.time_input("開始時間", value=cur_st, key="ed_b_st")
-                cur_et = datetime.strptime(str(b_curr["end_time"]), "%H:%M").time() if pd.notna(b_curr["end_time"]) else time(17, 0)
-                ed_et = st.time_input("結束時間", value=cur_et, key="ed_b_et")
-                ed_cond = st.radio("設備狀態", ["良好", "故障"], index=0 if b_curr["condition"] == "良好" else 1, horizontal=True, key="ed_b_cond")
-                ed_fault = st.text_area("故障說明", value=str(b_curr["fault_desc"]) if pd.notna(b_curr["fault_desc"]) else "", key="ed_b_fault")
+                eb_col1, eb_col2 = st.columns(2)
+                with eb_col1:
+                    ed_item = st.selectbox("借用物品", DEVICES, index=DEVICES.index(b_curr["device_name"]) if b_curr["device_name"] in DEVICES else 0, key="ed_b_item")
+                    ed_app = st.selectbox("申請同仁", EMPLOYEES, index=EMPLOYEES.index(b_curr["applicant"]) if b_curr["applicant"] in EMPLOYEES else 0, key="ed_b_app")
+                    try:
+                        cur_bd = datetime.strptime(str(b_curr["borrow_date"]).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_bd = date.today()
+                    ed_bd = st.date_input("借用日期", value=cur_bd, key="ed_b_date")
+                with eb_col2:
+                    try:
+                        cur_st = datetime.strptime(str(b_curr["start_time"]).strip(), "%H:%M").time()
+                    except Exception:
+                        cur_st = time(9, 0)
+                    ed_st = st.time_input("開始時間", value=cur_st, key="ed_b_st")
+                    try:
+                        cur_et = datetime.strptime(str(b_curr["end_time"]).strip(), "%H:%M").time()
+                    except Exception:
+                        cur_et = time(17, 0)
+                    ed_et = st.time_input("結束時間", value=cur_et, key="ed_b_et")
+                    ed_cond = st.radio("設備狀態", ["良好", "故障"], index=0 if b_curr["condition"] == "良好" else 1, horizontal=True, key="ed_b_cond")
+                    ed_fault = st.text_area("故障說明", value=str(b_curr["fault_desc"]), key="ed_b_fault")
 
-            if st.button("儲存借用修改", key="btn_save_edit_device"):
-                df_b.loc[df_b["id"] == target_b_id, ["device_name", "applicant", "borrow_date", "start_time", "end_time", "condition", "fault_desc"]] = [
-                    ed_item, ed_app, str(ed_bd), ed_st.strftime("%H:%M"), ed_et.strftime("%H:%M"), ed_cond, ed_fault
-                ]
-                save_data("device_borrows", df_b)
-                st.success("3C 借用紀錄已成功更新！")
-                st.rerun()
+                if st.button("儲存借用修改", key="btn_save_edit_device"):
+                    df_b.loc[df_b["id"].astype(str) == target_b_id, ["device_name", "applicant", "borrow_date", "start_time", "end_time", "condition", "fault_desc"]] = [
+                        ed_item, ed_app, str(ed_bd), ed_st.strftime("%H:%M"), ed_et.strftime("%H:%M"), ed_cond, str(ed_fault)
+                    ]
+                    save_data("device_borrows", df_b)
+                    st.success("3C 借用紀錄已成功更新！")
+                    st.rerun()
+            else:
+                st.info("目前尚無有效的 3C 借用紀錄可供修改。")
         else:
             st.info("目前尚無 3C 借用紀錄可供修改。")
 
@@ -540,7 +621,7 @@ elif menu == "🖨️ 影印輸出登記":
 
         if submit_print:
             df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
-            new_p = pd.DataFrame([{"log_date": str(p_date), "user_name": p_user, "pages": p_pages, "print_type": p_type, "purpose": p_purpose}])
+            new_p = pd.DataFrame([{"log_date": str(p_date), "user_name": str(p_user), "pages": str(p_pages), "print_type": str(p_type), "purpose": str(p_purpose)}])
             df_p = pd.concat([df_p, new_p], ignore_index=True)
             save_data("print_logs", df_p)
             st.success("影印紀錄已送出！")
@@ -553,7 +634,7 @@ elif menu == "🖨️ 影印輸出登記":
 elif menu == "📦 物資出入庫管理":
     st.header("📦 物資申請出庫與採購入庫")
     df_supplies = load_data("supplies", ["item_name", "stock"])
-    items = df_supplies["item_name"].tolist()
+    items = [x for x in df_supplies["item_name"].astype(str).tolist() if x.strip()]
 
     tab_out, tab_in = st.tabs(["📤 領用出庫", "📥 採購入庫"])
 
@@ -561,19 +642,20 @@ elif menu == "📦 物資出入庫管理":
         col_o1, col_o2 = st.columns(2)
         with col_o1:
             applicant = st.selectbox("領用人", EMPLOYEES, key="mat_out_user")
-            out_item = st.selectbox("物資品項", items, key="mat_out_item")
+            out_item = st.selectbox("物資品項", items if items else DEFAULT_SUPPLIES, key="mat_out_item")
         with col_o2:
             out_qty = st.number_input("領用數量", min_value=1, value=1, step=1, key="mat_out_q")
             out_d = st.date_input("領用日期", value=date.today())
 
         if st.button("確認出庫", key="btn_mat_out"):
-            cur_stock = int(df_supplies.loc[df_supplies["item_name"] == out_item, "stock"].values[0])
+            cur_rows = df_supplies[df_supplies["item_name"].astype(str) == out_item]
+            cur_stock = int(cur_rows["stock"].values[0]) if not cur_rows.empty and str(cur_rows["stock"].values[0]).isdigit() else 0
             if cur_stock >= out_qty:
-                df_supplies.loc[df_supplies["item_name"] == out_item, "stock"] = cur_stock - out_qty
+                df_supplies.loc[df_supplies["item_name"].astype(str) == out_item, "stock"] = str(cur_stock - out_qty)
                 save_data("supplies", df_supplies)
 
                 df_logs = load_data("inventory_logs", ["log_date", "log_type", "handler", "item_name", "quantity"])
-                new_log = pd.DataFrame([{"log_date": str(out_d), "log_type": "領用出庫", "handler": applicant, "item_name": out_item, "quantity": out_qty}])
+                new_log = pd.DataFrame([{"log_date": str(out_d), "log_type": "領用出庫", "handler": str(applicant), "item_name": str(out_item), "quantity": str(out_qty)}])
                 df_logs = pd.concat([df_logs, new_log], ignore_index=True)
                 save_data("inventory_logs", df_logs)
 
@@ -586,18 +668,19 @@ elif menu == "📦 物資出入庫管理":
         col_i1, col_i2 = st.columns(2)
         with col_i1:
             buyer = st.selectbox("入庫人", EMPLOYEES, key="mat_in_user")
-            in_item = st.selectbox("入庫品項", items, key="mat_in_item")
+            in_item = st.selectbox("入庫品項", items if items else DEFAULT_SUPPLIES, key="mat_in_item")
         with col_i2:
             in_qty = st.number_input("採購進貨數量", min_value=1, value=1, step=1, key="mat_in_q")
             in_d = st.date_input("入庫日期", value=date.today())
 
         if st.button("確認入庫", key="btn_mat_in"):
-            cur_stock = int(df_supplies.loc[df_supplies["item_name"] == in_item, "stock"].values[0])
-            df_supplies.loc[df_supplies["item_name"] == in_item, "stock"] = cur_stock + in_qty
+            cur_rows = df_supplies[df_supplies["item_name"].astype(str) == in_item]
+            cur_stock = int(cur_rows["stock"].values[0]) if not cur_rows.empty and str(cur_rows["stock"].values[0]).isdigit() else 0
+            df_supplies.loc[df_supplies["item_name"].astype(str) == in_item, "stock"] = str(cur_stock + in_qty)
             save_data("supplies", df_supplies)
 
             df_logs = load_data("inventory_logs", ["log_date", "log_type", "handler", "item_name", "quantity"])
-            new_log = pd.DataFrame([{"log_date": str(in_d), "log_type": "採購入庫", "handler": buyer, "item_name": in_item, "quantity": in_qty}])
+            new_log = pd.DataFrame([{"log_date": str(in_d), "log_type": "採購入庫", "handler": str(buyer), "item_name": str(in_item), "quantity": str(in_qty)}])
             df_logs = pd.concat([df_logs, new_log], ignore_index=True)
             save_data("inventory_logs", df_logs)
 
