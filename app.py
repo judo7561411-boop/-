@@ -25,7 +25,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# 初始化本地備援資料庫 (保證即使網路延遲，切換分頁也不遺失資料)
+# 初始化本地備援資料庫
 def init_local_fallback():
     conn = sqlite3.connect(LOCAL_DB)
     c = conn.cursor()
@@ -101,7 +101,7 @@ def get_worksheet(sheet_name: str, default_cols: list):
             return None
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """載入資料：優先自 Google 試算表撈取最新數據，並同步更新本地快照"""
+    """載入資料：雲端 Google 試算表優先，本地備援同步"""
     ws = get_worksheet(sheet_name, default_cols)
     if ws:
         try:
@@ -120,15 +120,11 @@ def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
                 return df
         except Exception:
             pass
-    # 若雲端未連通或暫時無法讀取，使用本地防遺失快照
     return load_local_fallback(sheet_name, default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """雙重儲存：即時寫入本地備援 + 全量同步回 Google 試算表"""
-    # 1. 本地即刻持久化，確保切換分頁瞬間絕不消失
+    """雙重儲存：本地即時寫入 + 雲端同步"""
     save_local_fallback(sheet_name, df)
-
-    # 2. 雲端 Google 試算表同步
     ws = get_worksheet(sheet_name, df.columns.tolist())
     if ws:
         try:
@@ -137,9 +133,9 @@ def save_data(sheet_name: str, df: pd.DataFrame):
             values = df.fillna("").astype(str).values.tolist()
             ws.update(range_name="A1", values=[header] + values)
         except Exception as e:
-            st.error(f"雲端試算表同步異常，但資料已安全保存在本地備援中：{e}")
+            st.error(f"雲端試算表同步暫時延遲，本地已安全備份：{e}")
 
-# 初始化物資
+# 初始化物資預設庫存
 def ensure_supplies_setup():
     df = load_data("supplies", ["item_name", "stock"])
     if df.empty or len(df) == 0:
@@ -167,13 +163,13 @@ sh_conn = get_gspread_client()
 if sh_conn:
     st.sidebar.success("🟢 雲端 Google 試算表：連線同步中")
 else:
-    st.sidebar.warning("🟠 運作模式：本地安全儲存模式 (切換頁面資料不遺失)")
+    st.sidebar.info("🟠 儲存狀態：本地安全儲存模式 (切換頁面不遺失)")
 
 menu = st.sidebar.radio(
     "系統模組切換",
     [
         "🗓️ 互動月曆視圖",
-        "📤 匯出每月班表與行事",
+        "📤 匯出每月綜合報表",
         "📅 班表、排休與調班",
         "📌 工作行事登記",
         "📱 3C產品借用申請",
@@ -294,9 +290,11 @@ if menu == "🗓️ 互動月曆視圖":
     with list_tab2:
         st.dataframe(df_schedules.tail(30).iloc[::-1], width="stretch")
 
-# ==================== 模組 1: 匯出每月班表與行事 ====================
-elif menu == "📤 匯出每月班表與行事":
-    st.header("📤 每月工作行程及排班班別輸出")
+# ==================== 模組 1: 匯出每月綜合報表 (排班+行程+影印) ====================
+elif menu == "📤 匯出每月綜合報表":
+    st.header("📤 每月工作行程、排班及影印報表輸出")
+    st.info("💡 選擇年份與月份，可檢視當月排班、工作行事及影印總計，並支援下載整月份完整 Excel 活頁簿。")
+
     col_y, col_m = st.columns(2)
     with col_y:
         selected_year = st.selectbox("選擇年份", [2025, 2026, 2027], index=1)
@@ -306,6 +304,7 @@ elif menu == "📤 匯出每月班表與行事":
     _, num_days = py_calendar.monthrange(selected_year, selected_month)
     month_str = f"{selected_year}-{selected_month:02d}"
 
+    # 1. 班表整理
     df_schedules = load_data("schedules", ["employee_name", "leave_type", "start_date", "end_date"])
     roster_rows = []
     weekdays_zh = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
@@ -335,8 +334,9 @@ elif menu == "📤 匯出每月班表與行事":
         roster_rows.append(row)
 
     df_month_roster = pd.DataFrame(roster_rows)
-    df_works = load_data("work_events", ["start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
 
+    # 2. 行事整理
+    df_works = load_data("work_events", ["start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
     if not df_works.empty:
         df_month_events = df_works[
             (df_works["start_date"].astype(str) <= f"{month_str}-{num_days:02d}") &
@@ -345,26 +345,58 @@ elif menu == "📤 匯出每月班表與行事":
     else:
         df_month_events = pd.DataFrame()
 
-    st.markdown(f"### 📅 {selected_year} 年 {selected_month} 月 班表總覽")
-    st.dataframe(df_month_roster, width="stretch")
+    # 3. 影印紀錄整理與統計
+    df_p_all = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
+    if not df_p_all.empty:
+        df_p_all["pages_num"] = pd.to_numeric(df_p_all["pages"], errors="coerce").fillna(0).astype(int)
+        df_month_prints = df_p_all[
+            (df_p_all["log_date"].astype(str) >= f"{month_str}-01") &
+            (df_p_all["log_date"].astype(str) <= f"{month_str}-{num_days:02d}")
+        ].copy()
+    else:
+        df_month_prints = pd.DataFrame()
 
-    st.markdown(f"### 💼 {selected_year} 年 {selected_month} 月 工作行程一覽")
-    st.dataframe(df_month_events, width="stretch")
+    tab_exp1, tab_exp2, tab_exp3 = st.tabs(["📅 當月班表總覽", "💼 工作行程一覽", "🖨️ 影印統計與明細"])
+    with tab_exp1:
+        st.dataframe(df_month_roster, width="stretch")
+    with tab_exp2:
+        st.dataframe(df_month_events, width="stretch")
+    with tab_exp3:
+        if not df_month_prints.empty:
+            summary_p = df_month_prints.groupby(["user_name", "print_type"])["pages_num"].sum().unstack(fill_value=0)
+            for c in ["黑白", "彩色"]:
+                if c not in summary_p.columns:
+                    summary_p[c] = 0
+            summary_p["個人總張數"] = summary_p["黑白"] + summary_p["彩色"]
+            summary_p = summary_p.reset_index().rename(columns={"user_name": "登記人"})
+            st.markdown("##### 📊 同仁影印用量彙總表")
+            st.dataframe(summary_p, width="stretch")
 
+            st.markdown("##### 📝 影印詳細紀錄")
+            st.dataframe(df_month_prints[["log_date", "user_name", "pages", "print_type", "purpose"]].rename(
+                columns={"log_date": "影印日期", "user_name": "登記人", "pages": "張數", "print_type": "色彩規格", "purpose": "用途"}
+            ), width="stretch")
+        else:
+            st.info("該月份目前尚無影印輸出紀錄。")
+
+    # Excel 綜合輸出
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         df_month_roster.to_excel(writer, sheet_name="當月班表總覽", index=False)
-        df_month_events.to_excel(writer, sheet_name="當月工作行事", index=False)
+        df_month_events.to_excel(writer, sheet_name="當月工作行程", index=False)
+        if not df_month_prints.empty:
+            summary_p.to_excel(writer, sheet_name="影印統計彙總", index=False)
+            df_month_prints[["log_date", "user_name", "pages", "print_type", "purpose"]].to_excel(writer, sheet_name="影印明細流水帳", index=False)
 
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
+    col_ebtn1, col_ebtn2 = st.columns(2)
+    with col_ebtn1:
         st.download_button(
-            label=f"📥 下載 {selected_year}年{selected_month}月 完整 Excel 報表",
+            label=f"📥 下載 {selected_year}年{selected_month}月 完整綜合 Excel 報表",
             data=excel_buffer.getvalue(),
-            file_name=f"{selected_year}年{selected_month}月_排班與工作行程表.xlsx",
+            file_name=f"{selected_year}年{selected_month}月_公司綜合行政報表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    with col_btn2:
+    with col_ebtn2:
         st.download_button(
             label=f"📥 下載 {selected_year}年{selected_month}月 班表 CSV",
             data=df_month_roster.to_csv(index=False).encode("utf-8-sig"),
@@ -421,7 +453,7 @@ elif menu == "📅 班表、排休與調班":
                     }])
                     df_schedules = pd.concat([df_schedules, new_row], ignore_index=True)
                     save_data("schedules", df_schedules)
-                    st.success("排休登記成功！切換頁面資料將永久保存。")
+                    st.success("排休登記成功！已安全儲存。")
                     st.rerun()
 
     with tab_edit_leave:
@@ -687,30 +719,107 @@ elif menu == "📱 3C產品借用申請":
         else:
             st.info("目前尚無 3C 借用紀錄可供修改。")
 
-# ==================== 模組 5: 影印輸出登記 ====================
+# ==================== 模組 5: 影印輸出登記 (新增每月統計與匯出) ====================
 elif menu == "🖨️ 影印輸出登記":
-    st.header("🖨️ 影印輸出登記")
-    with st.form("print_form"):
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            p_user = st.selectbox("登記人姓名", EMPLOYEES)
-            p_date = st.date_input("影印日期", value=date.today())
-            p_pages = st.number_input("輸出張數", min_value=1, value=1, step=1)
-        with col_p2:
-            p_type = st.selectbox("色彩規格", ["黑白", "彩色"])
-            p_purpose = st.text_input("輸出用途")
-        submit_print = st.form_submit_button("登記輸出")
+    st.header("🖨️ 影印輸出登記與每月報表")
+    tab_p_reg, tab_p_month = st.tabs(["📝 影印登記", "📊 每月影印統計與輸出"])
 
-        if submit_print:
-            df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
-            new_p = pd.DataFrame([{"log_date": str(p_date), "user_name": str(p_user), "pages": str(p_pages), "print_type": str(p_type), "purpose": str(p_purpose)}])
-            df_p = pd.concat([df_p, new_p], ignore_index=True)
-            save_data("print_logs", df_p)
-            st.success("影印紀錄已送出！")
+    with tab_p_reg:
+        with st.form("print_form"):
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                p_user = st.selectbox("登記人姓名", EMPLOYEES)
+                p_date = st.date_input("影印日期", value=date.today())
+                p_pages = st.number_input("輸出張數", min_value=1, value=1, step=1)
+            with col_p2:
+                p_type = st.selectbox("色彩規格", ["黑白", "彩色"])
+                p_purpose = st.text_input("輸出用途 (例如：會議簡報、評鑑資料)")
+            submit_print = st.form_submit_button("登記輸出")
 
-    st.divider()
-    df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
-    st.dataframe(df_p.tail(20).iloc[::-1], width="stretch")
+            if submit_print:
+                df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
+                new_p = pd.DataFrame([{"log_date": str(p_date), "user_name": str(p_user), "pages": str(p_pages), "print_type": str(p_type), "purpose": str(p_purpose)}])
+                df_p = pd.concat([df_p, new_p], ignore_index=True)
+                save_data("print_logs", df_p)
+                st.success("影印紀錄已送出！切換頁面資料將安全留存。")
+                st.rerun()
+
+        st.divider()
+        st.subheader("📋 最新影印登記明細 (最近 20 筆)")
+        df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
+        st.dataframe(df_p.tail(20).iloc[::-1], width="stretch")
+
+    with tab_p_month:
+        st.subheader("📊 依月份查詢與匯出影印報表")
+        col_py, col_pm = st.columns(2)
+        with col_py:
+            p_year = st.selectbox("選擇年份", [2025, 2026, 2027], index=1, key="py_sel")
+        with col_pm:
+            p_month = st.selectbox("選擇月份", list(range(1, 13)), index=datetime.today().month - 1, key="pm_sel")
+
+        _, p_num_days = py_calendar.monthrange(p_year, p_month)
+        p_month_str = f"{p_year}-{p_month:02d}"
+
+        df_all_prints = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
+        if not df_all_prints.empty:
+            df_all_prints["pages_num"] = pd.to_numeric(df_all_prints["pages"], errors="coerce").fillna(0).astype(int)
+            cur_month_df = df_all_prints[
+                (df_all_prints["log_date"].astype(str) >= f"{p_month_str}-01") &
+                (df_all_prints["log_date"].astype(str) <= f"{p_month_str}-{p_num_days:02d}")
+            ].copy()
+        else:
+            cur_month_df = pd.DataFrame()
+
+        if not cur_month_df.empty:
+            # 統計總張數與黑白彩色分佈
+            summary = cur_month_df.groupby(["user_name", "print_type"])["pages_num"].sum().unstack(fill_value=0)
+            for c in ["黑白", "彩色"]:
+                if c not in summary.columns:
+                    summary[c] = 0
+            summary["個人合計"] = summary["黑白"] + summary["彩色"]
+            summary = summary.reset_index().rename(columns={"user_name": "同仁姓名"})
+
+            total_bw = summary["黑白"].sum()
+            total_color = summary["彩色"].sum()
+            total_all = summary["個人合計"].sum()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("當月全體黑白總量", f"{total_bw} 張")
+            m2.metric("當月全體彩色總量", f"{total_color} 張")
+            m3.metric("當月總輸出張數", f"{total_all} 張")
+
+            st.markdown("#### 👤 同仁個別印量總計")
+            st.dataframe(summary, width="stretch")
+
+            st.markdown("#### 📄 當月影印明細流水帳")
+            disp_detail = cur_month_df[["log_date", "user_name", "pages", "print_type", "purpose"]].rename(
+                columns={"log_date": "影印日期", "user_name": "登記人", "pages": "張數", "print_type": "色彩規格", "purpose": "用途"}
+            )
+            st.dataframe(disp_detail, width="stretch")
+
+            # Excel 匯出 (統計 + 明細 雙分頁)
+            p_excel_buf = io.BytesIO()
+            with pd.ExcelWriter(p_excel_buf, engine="openpyxl") as p_writer:
+                summary.to_excel(p_writer, sheet_name="同仁影印統計彙總", index=False)
+                disp_detail.to_excel(p_writer, sheet_name="當月影印明細", index=False)
+
+            col_pd1, col_pd2 = st.columns(2)
+            with col_pd1:
+                st.download_button(
+                    label=f"📥 下載 {p_year}年{p_month}月 影印報表 (Excel 檔)",
+                    data=p_excel_buf.getvalue(),
+                    file_name=f"{p_year}年{p_month}月_公司影印使用報表.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            with col_pd2:
+                st.download_button(
+                    label=f"📥 下載 {p_year}年{p_month}月 影印統計 (CSV 檔)",
+                    data=summary.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{p_year}年{p_month}月_影印統計.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.info(f"{p_year} 年 {p_month} 月 目前尚無任何影印登記紀錄。")
 
 # ==================== 模組 6: 物資出入庫管理 ====================
 elif menu == "📦 物資出入庫管理":
