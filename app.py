@@ -1,10 +1,12 @@
 import calendar as py_calendar
 from datetime import date, datetime, time
 import io
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
 from streamlit_calendar import calendar
-from streamlit_gsheets import GSheetsConnection
 
 # 預設固定名單與參數
 EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
@@ -15,52 +17,72 @@ DEFAULT_SUPPLIES = [
     "垃圾袋(小)", "垃圾袋(中)", "垃圾袋(大)", "廁所清潔劑", "洗碗精"
 ]
 
-# 建立 Google Sheets 連線
-conn = st.connection("gsheets", type=GSheetsConnection)
+# Google 試算表連線設定
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+@st.cache_resource
+def get_gspread_client():
+    """使用 Streamlit Secrets 中的憑證初始化 gspread 客戶端"""
+    try:
+        # 讀取 secrets
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        # 修正 private_key 中的換行字元
+        if "\\n" in service_account_info["private_key"]:
+            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+        
+        creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet_url = st.secrets["spreadsheet_url"]
+        sheet = client.open_by_url(spreadsheet_url)
+        return sheet
+    except Exception as e:
+        st.error(f"Google 試算表認證失敗，請檢查 Secrets 設定：{e}")
+        return None
+
+def get_worksheet(sheet_name: str, default_cols: list):
+    """取得工作表，若不存在則自動新建並加入欄位標題"""
+    sh = get_gspread_client()
+    if not sh:
+        return None
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
+        ws.append_row(default_cols)
+    return ws
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """安全載入指定工作表資料，若不存在或為空則自動初始化"""
+    """安全載入資料為 DataFrame"""
+    ws = get_worksheet(sheet_name, default_cols)
+    if not ws:
+        return pd.DataFrame(columns=default_cols)
     try:
-        df = conn.read(worksheet=sheet_name, ttl=0)
-        if df is None or df.empty:
-            df = pd.DataFrame(columns=default_cols)
-            save_data(sheet_name, df)
-            return df
-        # 確保所有必要欄位皆存在
+        records = ws.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=default_cols)
+        df = pd.DataFrame(records)
         for col in default_cols:
             if col not in df.columns:
                 df[col] = ""
-        return df.fillna("")
+        return df.fillna("").astype(str)
     except Exception:
-        df = pd.DataFrame(columns=default_cols)
-        try:
-            save_data(sheet_name, df)
-        except Exception:
-            pass
-        return df
+        return pd.DataFrame(columns=default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """安全寫入資料回 Google Sheets，避免 UnsupportedOperationError"""
+    """將 DataFrame 全量同步回 Google 工作表"""
+    ws = get_worksheet(sheet_name, df.columns.tolist())
+    if not ws:
+        return
     try:
-        # 清理字串避免 JSON 序列化失敗
-        df_to_save = df.copy().astype(str)
-        conn.update(worksheet=sheet_name, data=df_to_save)
-    except Exception:
-        # 當使用標準 update 失敗時，透過底層 gspread 客戶端強制同步
-        try:
-            gc = conn._instance
-            spreadsheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
-            sh = gc.open_by_url(spreadsheet_url)
-            try:
-                ws = sh.worksheet(sheet_name)
-            except Exception:
-                ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
-            ws.clear()
-            header = df.columns.tolist()
-            values = df.fillna("").values.tolist()
-            ws.update(range_name="A1", values=[header] + values)
-        except Exception as e:
-            st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
+        ws.clear()
+        header = df.columns.tolist()
+        values = df.fillna("").astype(str).values.tolist()
+        ws.update(range_name="A1", values=[header] + values)
+    except Exception as e:
+        st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
 
 # 初始化物資預設庫存
 def ensure_supplies_setup():
@@ -81,7 +103,7 @@ try:
 except Exception:
     pass
 
-# 頁面基本配置
+# 頁面配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
 st.title("🏢 公司內部行政管理系統")
 
