@@ -24,18 +24,21 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    """使用 Streamlit Secrets 中的憑證初始化 gspread 客戶端，並自動容錯修復私鑰格式"""
+    """解析 Secrets 中的原始 JSON 憑證並建立連線"""
     try:
-        service_account_info = dict(st.secrets["gcp_service_account"])
-        
-        # 深度清理與規範化 private_key，防止 PEM 格式載入錯誤
-        pk = service_account_info.get("private_key", "")
-        if pk:
-            # 移除外層可能多帶的單雙引號與空格
-            pk = pk.strip().strip("'").strip('"')
-            # 將跳脫符號 \\n 轉換為真實換行
-            pk = pk.replace("\\n", "\n")
-            service_account_info["private_key"] = pk
+        # 優先支援直接整包讀取 JSON 字串
+        if "gcp_json" in st.secrets:
+            json_str = st.secrets["gcp_json"]
+            service_account_info = json.loads(json_str)
+        elif "gcp_service_account" in st.secrets:
+            # 向下相容字典格式
+            service_account_info = dict(st.secrets["gcp_service_account"])
+            if "private_key" in service_account_info:
+                pk = service_account_info["private_key"].strip().strip("'").strip('"')
+                service_account_info["private_key"] = pk.replace("\\n", "\n")
+        else:
+            st.error("Secrets 中找不到 gcp_json 設定！")
+            return None
 
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         client = gspread.authorize(creds)
@@ -43,11 +46,11 @@ def get_gspread_client():
         sheet = client.open_by_url(spreadsheet_url)
         return sheet
     except Exception as e:
-        st.error(f"Google 試算表認證失敗，請檢查 Secrets 設定：{e}")
+        st.error(f"Google 試算表連線失敗：{e}")
         return None
 
 def get_worksheet(sheet_name: str, default_cols: list):
-    """取得工作表，若不存在則自動新建並加入欄位標題"""
+    """取得工作表，若不存在則自動新增並寫入標題欄"""
     sh = get_gspread_client()
     if not sh:
         return None
@@ -62,7 +65,7 @@ def get_worksheet(sheet_name: str, default_cols: list):
     return ws
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    """安全載入資料為 DataFrame"""
+    """安全載入工作表資料為 DataFrame"""
     ws = get_worksheet(sheet_name, default_cols)
     if not ws:
         return pd.DataFrame(columns=default_cols)
@@ -79,7 +82,7 @@ def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
         return pd.DataFrame(columns=default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """將 DataFrame 全量同步回 Google 工作表"""
+    """將 DataFrame 同步回 Google 試算表"""
     ws = get_worksheet(sheet_name, df.columns.tolist())
     if not ws:
         return
@@ -92,6 +95,7 @@ def save_data(sheet_name: str, df: pd.DataFrame):
         st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
 
 def ensure_supplies_setup():
+    """確保物資品項預載齊全"""
     df = load_data("supplies", ["item_name", "stock"])
     if df.empty or len(df) == 0:
         new_df = pd.DataFrame([{"item_name": item, "stock": "0"} for item in DEFAULT_SUPPLIES])
