@@ -17,7 +17,6 @@ DEFAULT_SUPPLIES = [
     "垃圾袋(小)", "垃圾袋(中)", "垃圾袋(大)", "廁所清潔劑", "洗碗精"
 ]
 
-# Google 試算表連線設定
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -25,14 +24,19 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    """使用 Streamlit Secrets 中的憑證初始化 gspread 客戶端"""
+    """使用 Streamlit Secrets 中的憑證初始化 gspread 客戶端，並自動容錯修復私鑰格式"""
     try:
-        # 讀取 secrets
         service_account_info = dict(st.secrets["gcp_service_account"])
-        # 修正 private_key 中的換行字元
-        if "\\n" in service_account_info["private_key"]:
-            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
         
+        # 深度清理與規範化 private_key，防止 PEM 格式載入錯誤
+        pk = service_account_info.get("private_key", "")
+        if pk:
+            # 移除外層可能多帶的單雙引號與空格
+            pk = pk.strip().strip("'").strip('"')
+            # 將跳脫符號 \\n 轉換為真實換行
+            pk = pk.replace("\\n", "\n")
+            service_account_info["private_key"] = pk
+
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         client = gspread.authorize(creds)
         spreadsheet_url = st.secrets["spreadsheet_url"]
@@ -50,8 +54,11 @@ def get_worksheet(sheet_name: str, default_cols: list):
     try:
         ws = sh.worksheet(sheet_name)
     except Exception:
-        ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
-        ws.append_row(default_cols)
+        try:
+            ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
+            ws.append_row(default_cols)
+        except Exception:
+            return None
     return ws
 
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
@@ -84,7 +91,6 @@ def save_data(sheet_name: str, df: pd.DataFrame):
     except Exception as e:
         st.error(f"寫入工作表 {sheet_name} 失敗：{e}")
 
-# 初始化物資預設庫存
 def ensure_supplies_setup():
     df = load_data("supplies", ["item_name", "stock"])
     if df.empty or len(df) == 0:
