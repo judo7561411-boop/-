@@ -24,20 +24,21 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    """解析 Secrets 中的原始 JSON 憑證並建立連線"""
+    """解析 Secrets 中的原始 JSON 憑證並建立連線（具備防呆機制）"""
     try:
-        # 優先支援直接整包讀取 JSON 字串
         if "gcp_json" in st.secrets:
             json_str = st.secrets["gcp_json"]
+            if not json_str or not str(json_str).strip():
+                st.error("⚠️ Streamlit Secrets 中的 gcp_json 內容為空白，請檢查後台設定！")
+                return None
             service_account_info = json.loads(json_str)
         elif "gcp_service_account" in st.secrets:
-            # 向下相容字典格式
             service_account_info = dict(st.secrets["gcp_service_account"])
             if "private_key" in service_account_info:
-                pk = service_account_info["private_key"].strip().strip("'").strip('"')
+                pk = str(service_account_info["private_key"]).strip().strip("'").strip('"')
                 service_account_info["private_key"] = pk.replace("\\n", "\n")
         else:
-            st.error("Secrets 中找不到 gcp_json 設定！")
+            st.error("⚠️ Streamlit Secrets 中未找到 gcp_json 或 gcp_service_account 設定！")
             return None
 
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -46,7 +47,7 @@ def get_gspread_client():
         sheet = client.open_by_url(spreadsheet_url)
         return sheet
     except Exception as e:
-        st.error(f"Google 試算表連線失敗：{e}")
+        st.error(f"Google 試算表連線失敗，請檢查格式：{e}")
         return None
 
 def get_worksheet(sheet_name: str, default_cols: list):
