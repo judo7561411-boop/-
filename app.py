@@ -26,7 +26,7 @@ DEFAULT_SUPPLIES = [
 
 
 def init_db():
-    """初始化資料庫並自動檢查修補資料表"""
+    """初始化資料庫並自動檢查修復資料表結構"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
 
@@ -94,7 +94,7 @@ def init_db():
                     description TEXT)"""
     )
 
-    # 6. 3C產品借用表
+    # 6. 3C產品借用申請表
     c.execute(
         """CREATE TABLE IF NOT EXISTS device_borrows (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,7 +125,7 @@ init_db()
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
 st.title("🏢 公司內部行政管理系統")
 
-# 側邊選單
+# 側邊導覽選單
 menu = st.sidebar.radio(
     "系統模組切換",
     [
@@ -140,7 +140,7 @@ menu = st.sidebar.radio(
 
 
 def get_daily_roster(query_date_str):
-    """計算指定日期的常規排班（奇偶月輪替）與臨時調班"""
+    """計算指定日期的排班人員（奇偶月輪替與臨時調班）"""
     q_date = datetime.strptime(query_date_str, "%Y-%m-%d")
     month = q_date.month
 
@@ -163,10 +163,10 @@ def get_daily_roster(query_date_str):
     return roster
 
 
-# ==================== 模組 0: 互動月曆視圖 ====================
+# ==================== 模組 0: 互動月曆視圖 (強化行事檢視) ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事與同仁排休月曆")
-    st.info("💡 藍色標記為【工作事項】，橘色標記為【同仁排休】。點選事項可查看完整資訊。")
+    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容。")
 
     conn = sqlite3.connect(DB_NAME)
     df_schedules = pd.read_sql(
@@ -181,65 +181,59 @@ if menu == "🗓️ 互動月曆視圖":
 
     calendar_events = []
 
-    # 排休事項 (橘色)
+    # 1. 組裝排休事件 (橘色系)
     for _, row in df_schedules.iterrows():
-        s_date = (
-            row["start_date"]
-            if pd.notna(row["start_date"]) and row["start_date"]
-            else str(date.today())
-        )
-        e_date = (
-            row["end_date"]
-            if pd.notna(row["end_date"]) and row["end_date"]
-            else s_date
-        )
+        s_date = row["start_date"] if pd.notna(row["start_date"]) and row["start_date"] else str(date.today())
+        e_date = row["end_date"] if pd.notna(row["end_date"]) and row["end_date"] else s_date
         calendar_events.append(
             {
-                "title": f"🏖️ {row['employee_name']} ({row['leave_type']})",
+                "title": f"🏖️ {row['employee_name']} [{row['leave_type']}]",
                 "start": s_date,
                 "end": e_date,
                 "backgroundColor": "#FF7A00",
                 "borderColor": "#FF7A00",
                 "textColor": "#FFFFFF",
                 "extendedProps": {
-                    "人員": row["employee_name"],
-                    "假別": row["leave_type"],
-                    "時間區間": f"{row['start_datetime']} 至 {row['end_datetime']}",
-                    "原因備註": row["note"],
+                    "類別": "🏖️ 同仁排休",
+                    "對象": row["employee_name"],
+                    "項目": f"{row['leave_type']}假",
+                    "日期區間": f"{s_date} ~ {e_date}",
+                    "時間明細": f"{row['start_datetime']} 至 {row['end_datetime']}",
+                    "詳細內容/備註": row["note"] if row["note"] else "無填寫備註",
                 },
             }
         )
 
-    # 工作事項 (藍色)
+    # 2. 組裝工作行事事件 (藍色系，標題直接加入時間以便閱讀)
     for _, row in df_works.iterrows():
-        s_d = (
-            row["start_date"]
-            if pd.notna(row["start_date"]) and row["start_date"]
-            else str(date.today())
-        )
-        e_d = (
-            row["end_date"]
-            if pd.notna(row["end_date"]) and row["end_date"]
-            else s_d
-        )
+        s_d = row["start_date"] if pd.notna(row["start_date"]) and row["start_date"] else str(date.today())
+        e_d = row["end_date"] if pd.notna(row["end_date"]) and row["end_date"] else s_d
+        s_t = row["start_time"] if row["start_time"] else "09:00"
+        e_t = row["end_time"] if row["end_time"] else "10:00"
+
+        # 標題直覺化：顯示時間 + 負責人 + 工作名稱
+        event_label = f"💼 {s_t} [{row['person_in_charge']}] {row['title']}"
+
         calendar_events.append(
             {
-                "title": f"💼 [{row['person_in_charge']}] {row['title']}",
-                "start": f"{s_d}T{row['start_time']}:00"
-                if row["start_time"]
-                else s_d,
-                "end": f"{e_d}T{row['end_time']}:00" if row["end_time"] else e_d,
+                "title": event_label,
+                "start": f"{s_d}T{s_t}:00",
+                "end": f"{e_d}T{e_t}:00",
                 "backgroundColor": "#1E88E5",
                 "borderColor": "#1E88E5",
                 "textColor": "#FFFFFF",
                 "extendedProps": {
-                    "負責人": row["person_in_charge"],
-                    "活動期間": f"{s_d} {row['start_time']} 至 {e_d} {row['end_time']}",
-                    "內容說明": row["description"],
+                    "類別": "💼 工作行事",
+                    "對象": row["person_in_charge"],
+                    "項目": row["title"],
+                    "日期區間": f"{s_d} 至 {e_d}" if s_d != e_d else s_d,
+                    "時間明細": f"{s_t} ~ {e_t}",
+                    "詳細內容/備註": row["description"] if row["description"] else "無詳細說明",
                 },
             }
         )
 
+    # FullCalendar 視圖設定
     calendar_options = {
         "headerToolbar": {
             "left": "today prev,next",
@@ -251,19 +245,63 @@ if menu == "🗓️ 互動月曆視圖":
         "selectable": True,
         "editable": False,
         "locale": "zh-tw",
+        "eventTimeFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
     }
 
     cal_out = calendar(
         events=calendar_events,
         options=calendar_options,
-        custom_css=".fc-event-title { font-weight: 500; }",
+        custom_css="""
+        .fc-event-title { font-weight: 500; font-size: 0.85rem; }
+        .fc-toolbar-title { font-size: 1.3rem !important; font-weight: bold; }
+        """,
         key="main_calendar_view",
     )
 
+    # 點擊事項展開精美資訊卡片
     if cal_out and "eventClick" in cal_out:
         detail = cal_out["eventClick"]["event"].get("extendedProps", {})
-        st.subheader("📌 事項詳情")
-        st.json(detail)
+        st.divider()
+        st.markdown(f"### 📌 事項詳情：{detail.get('項目', '')}")
+        col_c1, col_c2, col_c3 = st.columns(3)
+        col_c1.metric("類別與性質", detail.get("類別", ""))
+        col_c2.metric("負責人 / 請假同仁", detail.get("對象", ""))
+        col_c3.metric("時間時段", detail.get("時間明細", ""))
+
+        st.markdown(f"**🗓️ 活動日期：** `{detail.get('日期區間', '')}`")
+        st.markdown(f"**📝 內容與說明：**")
+        st.info(detail.get("詳細內容/備註", "無"))
+
+    # 月曆下方：工作行事與排休的清晰清單檢視
+    st.divider()
+    st.subheader("📋 近期實際行事與排休總覽清單")
+    list_tab1, list_tab2 = st.tabs(["💼 實際工作行事清單", "🏖️ 同仁排休明細"])
+
+    with list_tab1:
+        conn = sqlite3.connect(DB_NAME)
+        df_w_list = pd.read_sql(
+            """SELECT start_date AS 開始日期, end_date AS 結束日期,
+                      start_time || ' ~ ' || end_time AS 活動時段,
+                      person_in_charge AS 負責人, title AS 事項標題,
+                      description AS 詳細說明
+               FROM work_events ORDER BY start_date DESC LIMIT 30""",
+            conn,
+        )
+        conn.close()
+        st.dataframe(df_w_list, width="stretch")
+
+    with list_tab2:
+        conn = sqlite3.connect(DB_NAME)
+        df_s_list = pd.read_sql(
+            """SELECT employee_name AS 姓名, leave_type AS 假別,
+                      start_date AS 開始日期, end_date AS 結束日期,
+                      start_datetime AS 開始時段, end_datetime AS 結束時段,
+                      note AS 請假原因
+               FROM schedules ORDER BY start_date DESC LIMIT 30""",
+            conn,
+        )
+        conn.close()
+        st.dataframe(df_s_list, width="stretch")
 
 # ==================== 模組 1: 班表、排休與調班 (含排休修改) ====================
 elif menu == "📅 班表、排休與調班":
@@ -293,9 +331,7 @@ elif menu == "📅 班表、排休與調班":
             start_dt_str = f"{s_date} {s_time.strftime('%H:%M')}"
             end_dt_str = f"{e_date} {e_time.strftime('%H:%M')}"
 
-            if datetime.strptime(
-                start_dt_str, "%Y-%m-%d %H:%M"
-            ) >= datetime.strptime(end_dt_str, "%Y-%m-%d %H:%M"):
+            if datetime.strptime(start_dt_str, "%Y-%m-%d %H:%M") >= datetime.strptime(end_dt_str, "%Y-%m-%d %H:%M"):
                 st.error("結束時間必須晚於開始時間！")
             else:
                 conn = sqlite3.connect(DB_NAME)
@@ -308,33 +344,20 @@ elif menu == "📅 班表、排休與調班":
                 ).fetchall()
 
                 if conflict:
-                    conflict_info = "、".join(
-                        [f"{row[0]} ({row[1]}~{row[2]})" for row in conflict]
-                    )
-                    st.error(
-                        f"⚠️ 無法登記！當日已有同仁排休：{conflict_info}。依規定每日僅限 1 人排休。"
-                    )
+                    conflict_info = "、".join([f"{row[0]} ({row[1]}~{row[2]})" for row in conflict])
+                    st.error(f"⚠️ 無法登記！當日已有同仁排休：{conflict_info}。依規定每日僅限 1 人排休。")
                     conn.close()
                 else:
                     c.execute(
                         """INSERT INTO schedules (employee_name, leave_type, start_datetime, end_datetime, start_date, end_date, note) 
                                  VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            emp,
-                            l_type,
-                            start_dt_str,
-                            end_dt_str,
-                            str(s_date),
-                            str(e_date),
-                            l_note,
-                        ),
+                        (emp, l_type, start_dt_str, end_dt_str, str(s_date), str(e_date), l_note),
                     )
                     conn.commit()
                     conn.close()
                     st.success("排休登記成功！")
                     st.rerun()
 
-    # [新增] 排休紀錄修改子分頁
     with tab_edit_leave:
         st.subheader("✏️ 修改或更新排休紀錄")
         conn = sqlite3.connect(DB_NAME)
@@ -344,10 +367,7 @@ elif menu == "📅 班表、排休與調班":
         conn.close()
 
         if leave_records:
-            record_options = {
-                f"編號 {r[0]} | {r[1]} - {r[2]} ({r[3]} ~ {r[4]})": r[0]
-                for r in leave_records
-            }
+            record_options = {f"編號 {r[0]} | {r[1]} - {r[2]} ({r[3]} ~ {r[4]})": r[0] for r in leave_records}
             selected_label = st.selectbox("請選擇欲修改的排休紀錄", list(record_options.keys()))
             target_id = record_options[selected_label]
 
@@ -361,7 +381,12 @@ elif menu == "📅 班表、排休與調班":
             c_e1, c_e2 = st.columns(2)
             with c_e1:
                 edit_emp = st.selectbox("請假同仁", EMPLOYEES, index=EMPLOYEES.index(curr[0]), key="ed_l_emp")
-                edit_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], index=["特休", "補休", "公假", "公出", "事假", "病假"].index(curr[1]), key="ed_l_type")
+                edit_type = st.selectbox(
+                    "假別",
+                    ["特休", "補休", "公假", "公出", "事假", "病假"],
+                    index=["特休", "補休", "公假", "公出", "事假", "病假"].index(curr[1]),
+                    key="ed_l_type",
+                )
                 cur_sd = datetime.strptime(curr[2], "%Y-%m-%d").date() if curr[2] else date.today()
                 edit_sd = st.date_input("開始休假日期", value=cur_sd, key="ed_l_sd")
             with c_e2:
@@ -425,9 +450,7 @@ elif menu == "📅 班表、排休與調班":
             )
             conn.commit()
             conn.close()
-            st.success(
-                f"{swap_d} {swap_emp} 已成功調整為 {new_shift.split(' ')[0]}！"
-            )
+            st.success(f"{swap_d} {swap_emp} 已成功調整為 {new_shift.split(' ')[0]}！")
 
     with tab_schedule_view:
         st.subheader("查詢當日實際班表")
@@ -518,7 +541,6 @@ elif menu == "📌 工作行事登記":
             conn.close()
             st.dataframe(df_w, width="stretch")
 
-    # [新增] 修改工作行事子分頁
     with tab_act_edit:
         st.subheader("✏️ 修改既有工作行事")
         conn = sqlite3.connect(DB_NAME)
@@ -528,9 +550,7 @@ elif menu == "📌 工作行事登記":
         conn.close()
 
         if work_list:
-            w_options = {
-                f"編號 {w[0]} | [{w[3]}] {w[1]} ({w[2]})": w[0] for w in work_list
-            }
+            w_options = {f"編號 {w[0]} | [{w[3]}] {w[1]} ({w[2]})": w[0] for w in work_list}
             w_choice = st.selectbox("選擇欲修改的事項", list(w_options.keys()), key="edit_w_select")
             target_w_id = w_options[w_choice]
 
@@ -544,7 +564,12 @@ elif menu == "📌 工作行事登記":
             ew_col1, ew_col2 = st.columns(2)
             with ew_col1:
                 new_w_title = st.text_input("活動/事項標題", value=w_data[0], key="ew_title")
-                new_w_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, index=EVENT_RESPONSIBLES.index(w_data[1]), key="ew_pic")
+                new_w_pic = st.selectbox(
+                    "負責人",
+                    EVENT_RESPONSIBLES,
+                    index=EVENT_RESPONSIBLES.index(w_data[1]),
+                    key="ew_pic",
+                )
                 cur_wsd = datetime.strptime(w_data[2], "%Y-%m-%d").date() if w_data[2] else date.today()
                 new_w_sd = st.date_input("開始日期", value=cur_wsd, key="ew_sd")
                 cur_wst = datetime.strptime(w_data[4], "%H:%M").time() if w_data[4] else time(9, 0)
@@ -650,7 +675,6 @@ elif menu == "📱 3C產品借用申請":
             conn.close()
             st.dataframe(df_borrows, width="stretch")
 
-    # [新增] 修改 3C 借用紀錄子分頁
     with tab_dev_edit:
         st.subheader("✏️ 修改或更新 3C 借用紀錄")
         conn = sqlite3.connect(DB_NAME)
@@ -660,9 +684,7 @@ elif menu == "📱 3C產品借用申請":
         conn.close()
 
         if b_records:
-            b_opts = {
-                f"編號 {r[0]} | {r[1]} 借用 {r[2]} ({r[3]} - {r[4]})": r[0] for r in b_records
-            }
+            b_opts = {f"編號 {r[0]} | {r[1]} 借用 {r[2]} ({r[3]} - {r[4]})": r[0] for r in b_records}
             b_choice = st.selectbox("請選擇欲修改的借用紀錄", list(b_opts.keys()), key="ed_b_select")
             target_b_id = b_opts[b_choice]
 
@@ -685,7 +707,13 @@ elif menu == "📱 3C產品借用申請":
                 ed_st = st.time_input("開始時間", value=cur_st, key="ed_b_st")
                 cur_et = datetime.strptime(b_curr[4], "%H:%M").time() if b_curr[4] else time(17, 0)
                 ed_et = st.time_input("結束時間", value=cur_et, key="ed_b_et")
-                ed_cond = st.radio("設備狀態", ["良好", "故障"], index=0 if b_curr[5] == "良好" else 1, horizontal=True, key="ed_b_cond")
+                ed_cond = st.radio(
+                    "設備狀態",
+                    ["良好", "故障"],
+                    index=0 if b_curr[5] == "良好" else 1,
+                    horizontal=True,
+                    key="ed_b_cond",
+                )
                 ed_fault = st.text_area("故障說明", value=b_curr[6] if b_curr[6] else "", key="ed_b_fault")
 
             if st.button("儲存借用修改", key="btn_save_edit_device"):
@@ -756,12 +784,7 @@ elif menu == "🖨️ 影印輸出登記":
 elif menu == "📦 物資出入庫管理":
     st.header("📦 物資申請出庫與採購入庫")
     conn = sqlite3.connect(DB_NAME)
-    items = [
-        row[0]
-        for row in conn.cursor()
-        .execute("SELECT item_name FROM supplies ORDER BY id ASC")
-        .fetchall()
-    ]
+    items = [row[0] for row in conn.cursor().execute("SELECT item_name FROM supplies ORDER BY id ASC").fetchall()]
     conn.close()
 
     tab_out, tab_in = st.tabs(["📤 領用出庫", "📥 採購入庫"])
@@ -772,17 +795,13 @@ elif menu == "📦 物資出入庫管理":
             applicant = st.selectbox("領用人", EMPLOYEES, key="mat_out_user")
             out_item = st.selectbox("物資品項", items, key="mat_out_item")
         with col_o2:
-            out_qty = st.number_input(
-                "領用數量", min_value=1, value=1, step=1, key="mat_out_q"
-            )
+            out_qty = st.number_input("領用數量", min_value=1, value=1, step=1, key="mat_out_q")
             out_d = st.date_input("領用日期", value=date.today())
 
         if st.button("確認出庫", key="btn_mat_out"):
             conn = sqlite3.connect(DB_NAME)
             c = conn.cursor()
-            cur_stock = c.execute(
-                "SELECT stock FROM supplies WHERE item_name = ?", (out_item,)
-            ).fetchone()[0]
+            cur_stock = c.execute("SELECT stock FROM supplies WHERE item_name = ?", (out_item,)).fetchone()[0]
             if cur_stock >= out_qty:
                 c.execute(
                     "UPDATE supplies SET stock = stock - ? WHERE item_name = ?",
@@ -793,9 +812,7 @@ elif menu == "📦 物資出入庫管理":
                     ("領用出庫", applicant, out_item, out_qty, str(out_d)),
                 )
                 conn.commit()
-                st.success(
-                    f"出庫成功！{out_item} 剩餘庫存：{cur_stock - out_qty}"
-                )
+                st.success(f"出庫成功！{out_item} 剩餘庫存：{cur_stock - out_qty}")
                 st.rerun()
             else:
                 st.error(f"庫存不足！{out_item} 目前僅剩 {cur_stock}")
@@ -807,9 +824,7 @@ elif menu == "📦 物資出入庫管理":
             buyer = st.selectbox("入庫人", EMPLOYEES, key="mat_in_user")
             in_item = st.selectbox("入庫品項", items, key="mat_in_item")
         with col_i2:
-            in_qty = st.number_input(
-                "採購進貨數量", min_value=1, value=1, step=1, key="mat_in_q"
-            )
+            in_qty = st.number_input("採購進貨數量", min_value=1, value=1, step=1, key="mat_in_q")
             in_d = st.date_input("入庫日期", value=date.today())
 
         if st.button("確認入庫", key="btn_mat_in"):
