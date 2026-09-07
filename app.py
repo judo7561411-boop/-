@@ -24,21 +24,26 @@ SCOPES = [
 
 @st.cache_resource
 def get_gspread_client():
-    """解析 Secrets 中的原始 JSON 憑證並建立連線（具備防呆機制）"""
+    """解析 Secrets 憑證並建立 Google 試算表連線，雙軌相容字典與 JSON 字串"""
     try:
-        if "gcp_json" in st.secrets:
-            json_str = st.secrets["gcp_json"]
-            if not json_str or not str(json_str).strip():
-                st.error("⚠️ Streamlit Secrets 中的 gcp_json 內容為空白，請檢查後台設定！")
-                return None
-            service_account_info = json.loads(json_str)
-        elif "gcp_service_account" in st.secrets:
+        service_account_info = None
+
+        # 優先方案 A：直接讀取 [gcp_service_account] 字典
+        if "gcp_service_account" in st.secrets:
             service_account_info = dict(st.secrets["gcp_service_account"])
             if "private_key" in service_account_info:
                 pk = str(service_account_info["private_key"]).strip().strip("'").strip('"')
                 service_account_info["private_key"] = pk.replace("\\n", "\n")
-        else:
-            st.error("⚠️ Streamlit Secrets 中未找到 gcp_json 或 gcp_service_account 設定！")
+
+        # 備用方案 B：讀取 gcp_json 字串
+        elif "gcp_json" in st.secrets:
+            raw_str = st.secrets["gcp_json"]
+            if raw_str and len(str(raw_str).strip()) > 10:
+                cleaned_str = str(raw_str).strip().strip("'''").strip('"""')
+                service_account_info = json.loads(cleaned_str)
+
+        if not service_account_info:
+            st.error("⚠️ 未在 Streamlit Secrets 中找到有效的 Google 服務帳戶憑證設定！")
             return None
 
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -47,11 +52,11 @@ def get_gspread_client():
         sheet = client.open_by_url(spreadsheet_url)
         return sheet
     except Exception as e:
-        st.error(f"Google 試算表連線失敗，請檢查格式：{e}")
+        st.error(f"Google 試算表連線失敗，請檢查憑證或共用權限設定：{e}")
         return None
 
 def get_worksheet(sheet_name: str, default_cols: list):
-    """取得工作表，若不存在則自動新增並寫入標題欄"""
+    """安全獲取指定工作表，若不存在則自動新增並寫入標題欄位"""
     sh = get_gspread_client()
     if not sh:
         return None
@@ -83,7 +88,7 @@ def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
         return pd.DataFrame(columns=default_cols)
 
 def save_data(sheet_name: str, df: pd.DataFrame):
-    """將 DataFrame 同步回 Google 試算表"""
+    """將 DataFrame 全量同步回 Google 試算表"""
     ws = get_worksheet(sheet_name, df.columns.tolist())
     if not ws:
         return
