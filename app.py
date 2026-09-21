@@ -136,8 +136,9 @@ def save_data(sheet_name: str, df: pd.DataFrame):
         except Exception as e:
             st.error(f"雲端試算表同步暫時延遲，本地已安全備份：{e}")
 
-# 產生 Google 日曆連動連結
+# ==================== 手機行事曆格式化工具函式 ====================
 def make_google_calendar_link(title, s_date, e_date, s_time, e_time, desc, pic):
+    """產生 Google 日曆新增行程網址（支援手機直接開啟）"""
     try:
         s_dt = datetime.strptime(f"{s_date} {s_time}", "%Y-%m-%d %H:%M")
         e_dt = datetime.strptime(f"{e_date} {e_time}", "%Y-%m-%d %H:%M")
@@ -150,12 +151,13 @@ def make_google_calendar_link(title, s_date, e_date, s_time, e_time, desc, pic):
         "action": "TEMPLATE",
         "text": f"[{pic}] {title}",
         "dates": dates_param,
-        "details": f"負責人：{pic}\n內容說明：{desc}",
+        "details": f"負責人：{pic}\n說明：{desc}",
+        "ctz": "Asia/Taipei"
     }
     return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
 
-# 產生手機通用的 iCalendar (.ics) 檔案文字
-def generate_ics_content(title, s_date, e_date, s_time, e_time, desc, pic):
+def generate_single_ics(title, s_date, e_date, s_time, e_time, desc, pic):
+    """產生單筆通用 .ics 行事曆檔案文字"""
     try:
         s_dt = datetime.strptime(f"{s_date} {s_time}", "%Y-%m-%d %H:%M")
         e_dt = datetime.strptime(f"{e_date} {e_time}", "%Y-%m-%d %H:%M")
@@ -168,7 +170,7 @@ def generate_ics_content(title, s_date, e_date, s_time, e_time, desc, pic):
     now_str = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     uid = f"{dtstart}-{pic}-{hash(title)}@companyadmin"
     
-    ics = (
+    return (
         "BEGIN:VCALENDAR\r\n"
         "VERSION:2.0\r\n"
         "PRODID:-//Company Admin//Work Events//ZH\r\n"
@@ -179,12 +181,57 @@ def generate_ics_content(title, s_date, e_date, s_time, e_time, desc, pic):
         f"DTSTART:{dtstart}\r\n"
         f"DTEND:{dtend}\r\n"
         f"SUMMARY:[{pic}] {title}\r\n"
-        f"DESCRIPTION:負責人：{pic} \\n說明：{desc}\r\n"
+        f"DESCRIPTION:負責人：{pic}\\n說明：{desc}\r\n"
         "STATUS:CONFIRMED\r\n"
         "END:VEVENT\r\n"
         "END:VCALENDAR\r\n"
     )
-    return ics
+
+def generate_monthly_ics(year, month, df_events):
+    """將整月份的工作行事打包成一份批次 .ics 檔案，供手機一鍵全數匯入"""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Company Admin//Monthly Events//ZH",
+        "CALSCALE:GREGORIAN",
+        f"X-WR-CALNAME:{year}年{month}月 工作行程",
+        "X-WR-TIMEZONE:Asia/Taipei"
+    ]
+    now_str = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    for idx, row in df_events.iterrows():
+        try:
+            s_d = str(row["start_date"]).strip()
+            e_d = str(row["end_date"]).strip() if str(row["end_date"]).strip() else s_d
+            s_t = str(row["start_time"]).strip() if str(row["start_time"]).strip() else "09:00"
+            e_t = str(row["end_time"]).strip() if str(row["end_time"]).strip() else "10:00"
+
+            s_dt = datetime.strptime(f"{s_d} {s_t}", "%Y-%m-%d %H:%M")
+            e_dt = datetime.strptime(f"{e_d} {e_t}", "%Y-%m-%d %H:%M")
+            dtstart = s_dt.strftime("%Y%m%dT%H%M00")
+            dtend = e_dt.strftime("%Y%m%dT%H%M00")
+        except Exception:
+            continue
+
+        pic = str(row.get("person_in_charge", "全體"))
+        title = str(row.get("title", "未命名工作事項"))
+        desc = str(row.get("description", ""))
+        uid = f"{year}{month}-{idx}-{hash(title)}@companyadmin"
+
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{now_str}",
+            f"DTSTART:{dtstart}",
+            f"DTEND:{dtend}",
+            f"SUMMARY:[{pic}] {title}",
+            f"DESCRIPTION:負責人：{pic}\\n說明：{desc}",
+            "STATUS:CONFIRMED",
+            "END:VEVENT"
+        ])
+
+    lines.append("END:VCALENDAR\r\n")
+    return "\r\n".join(lines)
 
 # 頁面配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
@@ -228,7 +275,7 @@ def get_daily_roster(query_date_str):
 # ==================== 模組 0: 互動月曆視圖 (含手機日曆同步) ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事與同仁排休月曆")
-    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容並同步至手機。")
+    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容並同步至個人手機。")
 
     df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"])
     df_works = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description"])
@@ -318,7 +365,7 @@ if menu == "🗓️ 互動月曆視圖":
         st.markdown("**📝 內容與說明：**")
         st.info(detail.get("詳細內容/備註", "無"))
 
-        # 如果點選的是工作事項，提供手機連動按鈕
+        # 提供手機日曆同步選項
         if detail.get("類別") == "💼 工作行事":
             g_link = make_google_calendar_link(
                 detail.get("項目", ""),
@@ -329,7 +376,7 @@ if menu == "🗓️ 互動月曆視圖":
                 detail.get("詳細內容/備註", ""),
                 detail.get("對象", "")
             )
-            ics_text = generate_ics_content(
+            ics_text = generate_single_ics(
                 detail.get("項目", ""),
                 detail.get("開始日期", ""),
                 detail.get("結束日期", ""),
@@ -339,13 +386,13 @@ if menu == "🗓️ 互動月曆視圖":
                 detail.get("對象", "")
             )
             
-            st.markdown("#### 📲 同步至手機行事曆")
+            st.markdown("#### 📲 同步此行程至手機")
             col_m_btn1, col_m_btn2 = st.columns(2)
             with col_m_btn1:
-                st.link_button("📅 加入 Google 日曆 (手機直接開啟)", g_link)
+                st.link_button("📅 加入 Google 日曆 (手機直接喚起)", g_link)
             with col_m_btn2:
                 st.download_button(
-                    label="🍏 下載 Apple / 通用 .ics 行事曆檔",
+                    label="🍏 匯入 iPhone / Apple 行事曆 (.ics)",
                     data=ics_text,
                     file_name=f"{detail.get('項目', 'event')}.ics",
                     mime="text/calendar",
@@ -359,10 +406,10 @@ if menu == "🗓️ 互動月曆視圖":
     with list_tab2:
         st.dataframe(df_schedules.tail(30).iloc[::-1], width="stretch")
 
-# ==================== 模組 1: 匯出每月綜合報表 ====================
+# ==================== 模組 1: 匯出每月綜合報表 (含手機批次匯入) ====================
 elif menu == "📤 匯出每月綜合報表":
-    st.header("📤 每月工作行程、排班及影印報表輸出")
-    st.info("💡 選擇年份與月份，可檢視當月排班、工作行事及影印總計，並支援下載整月份完整 Excel 活頁簿。")
+    st.header("📤 每月工作行程、排班、影印報表及手機日曆整月同步")
+    st.info("💡 選擇年份與月份，可下載整月份 Excel 綜合行政報表，或將當月工作行程一鍵打包同步至手機行事曆。")
 
     col_y, col_m = st.columns(2)
     with col_y:
@@ -373,6 +420,7 @@ elif menu == "📤 匯出每月綜合報表":
     _, num_days = py_calendar.monthrange(selected_year, selected_month)
     month_str = f"{selected_year}-{selected_month:02d}"
 
+    # 1. 班表整理
     df_schedules = load_data("schedules", ["employee_name", "leave_type", "start_date", "end_date"])
     roster_rows = []
     weekdays_zh = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
@@ -403,15 +451,17 @@ elif menu == "📤 匯出每月綜合報表":
 
     df_month_roster = pd.DataFrame(roster_rows)
 
+    # 2. 行事整理
     df_works = load_data("work_events", ["start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
     if not df_works.empty:
         df_month_events = df_works[
             (df_works["start_date"].astype(str) <= f"{month_str}-{num_days:02d}") &
             (df_works["end_date"].astype(str) >= f"{month_str}-01")
-        ]
+        ].copy()
     else:
         df_month_events = pd.DataFrame()
 
+    # 3. 影印紀錄整理
     df_p_all = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
     if not df_p_all.empty:
         df_p_all["pages_num"] = pd.to_numeric(df_p_all["pages"], errors="coerce").fillna(0).astype(int)
@@ -445,6 +495,10 @@ elif menu == "📤 匯出每月綜合報表":
         else:
             st.info("該月份目前尚無影印輸出紀錄。")
 
+    st.divider()
+    st.subheader("📥 報表下載與手機日曆整月同步")
+
+    # Excel 綜合輸出
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         df_month_roster.to_excel(writer, sheet_name="當月班表總覽", index=False)
@@ -453,7 +507,10 @@ elif menu == "📤 匯出每月綜合報表":
             summary_p.to_excel(writer, sheet_name="影印統計彙總", index=False)
             df_month_prints[["log_date", "user_name", "pages", "print_type", "purpose"]].to_excel(writer, sheet_name="影印明細流水帳", index=False)
 
-    col_ebtn1, col_ebtn2 = st.columns(2)
+    # 批次整月 .ics 手機行事曆文字
+    monthly_ics_text = generate_monthly_ics(selected_year, selected_month, df_month_events)
+
+    col_ebtn1, col_ebtn2, col_ebtn3 = st.columns(3)
     with col_ebtn1:
         st.download_button(
             label=f"📥 下載 {selected_year}年{selected_month}月 完整綜合 Excel 報表",
@@ -467,6 +524,14 @@ elif menu == "📤 匯出每月綜合報表":
             data=df_month_roster.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"{selected_year}年{selected_month}月_班表.csv",
             mime="text/csv",
+        )
+    with col_ebtn3:
+        st.download_button(
+            label=f"📲 手機整月行事曆一鍵匯入檔 (.ics)",
+            data=monthly_ics_text,
+            file_name=f"{selected_year}年{selected_month}月_工作行程_手機行事曆.ics",
+            mime="text/calendar",
+            help="手機點擊下載後開啟，即可將整月所有工作行程一次匯入手機行事曆中！"
         )
 
 # ==================== 模組 2: 班表、排休與調班 ====================
@@ -639,23 +704,23 @@ elif menu == "📌 工作行事登記":
                     st.success("工作行事已成功登記！")
                     st.rerun()
 
-            # 針對當前輸入的行事，直接產生手機連動連結
+            # 針對正在輸入的行事，即時提供手機連動按鈕
             if event_title.strip():
                 st.divider()
-                st.markdown("##### 📲 立即加入手機行事曆")
+                st.markdown("##### 📲 立即同步至手機行事曆")
                 cur_g_link = make_google_calendar_link(
                     event_title, str(event_s_date), str(event_e_date),
                     event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
                     event_desc, event_pic
                 )
-                cur_ics = generate_ics_content(
+                cur_ics = generate_single_ics(
                     event_title, str(event_s_date), str(event_e_date),
                     event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
                     event_desc, event_pic
                 )
                 st.link_button("📅 加入 Google 日曆 (手機直接開啟)", cur_g_link)
                 st.download_button(
-                    label="🍏 下載 Apple 行事曆 (.ics)",
+                    label="🍏 匯入 Apple / 通用日曆 (.ics)",
                     data=cur_ics,
                     file_name=f"{event_title}.ics",
                     mime="text/calendar",
@@ -714,14 +779,13 @@ elif menu == "📌 工作行事登記":
                     st.success("工作行事已成功更新！")
                     st.rerun()
 
-                # 提供已儲存行程的手機同步連結
                 st.markdown("##### 📲 同步此行程至手機")
                 edit_g_link = make_google_calendar_link(
                     str(w_curr["title"]), str(w_curr["start_date"]), str(w_curr["end_date"]),
                     str(w_curr["start_time"]), str(w_curr["end_time"]),
                     str(w_curr["description"]), str(w_curr["person_in_charge"])
                 )
-                edit_ics = generate_ics_content(
+                edit_ics = generate_single_ics(
                     str(w_curr["title"]), str(w_curr["start_date"]), str(w_curr["end_date"]),
                     str(w_curr["start_time"]), str(w_curr["end_time"]),
                     str(w_curr["description"]), str(w_curr["person_in_charge"])
@@ -731,7 +795,7 @@ elif menu == "📌 工作行事登記":
                     st.link_button("📅 加入 Google 日曆 (手機直接開啟)", edit_g_link)
                 with col_e_m2:
                     st.download_button(
-                        label="🍏 下載 Apple 行事曆 (.ics)",
+                        label="🍏 匯入 Apple / 通用日曆 (.ics)",
                         data=edit_ics,
                         file_name=f"{w_curr['title']}.ics",
                         mime="text/calendar",
