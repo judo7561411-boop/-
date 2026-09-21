@@ -4,6 +4,7 @@ from datetime import date, datetime, time
 import io
 import json
 import sqlite3
+import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
@@ -135,24 +136,55 @@ def save_data(sheet_name: str, df: pd.DataFrame):
         except Exception as e:
             st.error(f"雲端試算表同步暫時延遲，本地已安全備份：{e}")
 
-# 初始化物資預設庫存
-def ensure_supplies_setup():
-    df = load_data("supplies", ["item_name", "stock"])
-    if df.empty or len(df) == 0:
-        new_df = pd.DataFrame([{"item_name": item, "stock": "0"} for item in DEFAULT_SUPPLIES])
-        save_data("supplies", new_df)
-    else:
-        existing = df["item_name"].astype(str).tolist()
-        missing = [item for item in DEFAULT_SUPPLIES if item not in existing]
-        if missing:
-            add_df = pd.DataFrame([{"item_name": m, "stock": "0"} for m in missing])
-            merged = pd.concat([df, add_df], ignore_index=True)
-            save_data("supplies", merged)
+# 產生 Google 日曆連動連結
+def make_google_calendar_link(title, s_date, e_date, s_time, e_time, desc, pic):
+    try:
+        s_dt = datetime.strptime(f"{s_date} {s_time}", "%Y-%m-%d %H:%M")
+        e_dt = datetime.strptime(f"{e_date} {e_time}", "%Y-%m-%d %H:%M")
+        fmt = "%Y%m%dT%H%M00"
+        dates_param = f"{s_dt.strftime(fmt)}/{e_dt.strftime(fmt)}"
+    except Exception:
+        dates_param = f"{str(s_date).replace('-', '')}/{str(e_date).replace('-', '')}"
 
-try:
-    ensure_supplies_setup()
-except Exception:
-    pass
+    params = {
+        "action": "TEMPLATE",
+        "text": f"[{pic}] {title}",
+        "dates": dates_param,
+        "details": f"負責人：{pic}\n內容說明：{desc}",
+    }
+    return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
+
+# 產生手機通用的 iCalendar (.ics) 檔案文字
+def generate_ics_content(title, s_date, e_date, s_time, e_time, desc, pic):
+    try:
+        s_dt = datetime.strptime(f"{s_date} {s_time}", "%Y-%m-%d %H:%M")
+        e_dt = datetime.strptime(f"{e_date} {e_time}", "%Y-%m-%d %H:%M")
+        dtstart = s_dt.strftime("%Y%m%dT%H%M00")
+        dtend = e_dt.strftime("%Y%m%dT%H%M00")
+    except Exception:
+        dtstart = f"{str(s_date).replace('-', '')}T090000"
+        dtend = f"{str(e_date).replace('-', '')}T100000"
+
+    now_str = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    uid = f"{dtstart}-{pic}-{hash(title)}@companyadmin"
+    
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//Company Admin//Work Events//ZH\r\n"
+        "CALSCALE:GREGORIAN\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\n"
+        f"DTSTAMP:{now_str}\r\n"
+        f"DTSTART:{dtstart}\r\n"
+        f"DTEND:{dtend}\r\n"
+        f"SUMMARY:[{pic}] {title}\r\n"
+        f"DESCRIPTION:負責人：{pic} \\n說明：{desc}\r\n"
+        "STATUS:CONFIRMED\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    return ics
 
 # 頁面配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
@@ -193,10 +225,10 @@ def get_daily_roster(query_date_str):
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 ====================
+# ==================== 模組 0: 互動月曆視圖 (含手機日曆同步) ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事與同仁排休月曆")
-    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容。")
+    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容並同步至手機。")
 
     df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"])
     df_works = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description"])
@@ -245,6 +277,10 @@ if menu == "🗓️ 互動月曆視圖":
                 "對象": str(row["person_in_charge"]),
                 "項目": str(row["title"]),
                 "日期區間": f"{s_d} 至 {e_d}" if s_d != e_d else s_d,
+                "開始日期": s_d,
+                "結束日期": e_d,
+                "開始時間": s_t,
+                "結束時間": e_t,
                 "時間明細": f"{s_t} ~ {e_t}",
                 "詳細內容/備註": str(row["description"]) if str(row["description"]).strip() else "無詳細說明",
             },
@@ -282,6 +318,39 @@ if menu == "🗓️ 互動月曆視圖":
         st.markdown("**📝 內容與說明：**")
         st.info(detail.get("詳細內容/備註", "無"))
 
+        # 如果點選的是工作事項，提供手機連動按鈕
+        if detail.get("類別") == "💼 工作行事":
+            g_link = make_google_calendar_link(
+                detail.get("項目", ""),
+                detail.get("開始日期", ""),
+                detail.get("結束日期", ""),
+                detail.get("開始時間", "09:00"),
+                detail.get("結束時間", "10:00"),
+                detail.get("詳細內容/備註", ""),
+                detail.get("對象", "")
+            )
+            ics_text = generate_ics_content(
+                detail.get("項目", ""),
+                detail.get("開始日期", ""),
+                detail.get("結束日期", ""),
+                detail.get("開始時間", "09:00"),
+                detail.get("結束時間", "10:00"),
+                detail.get("詳細內容/備註", ""),
+                detail.get("對象", "")
+            )
+            
+            st.markdown("#### 📲 同步至手機行事曆")
+            col_m_btn1, col_m_btn2 = st.columns(2)
+            with col_m_btn1:
+                st.link_button("📅 加入 Google 日曆 (手機直接開啟)", g_link)
+            with col_m_btn2:
+                st.download_button(
+                    label="🍏 下載 Apple / 通用 .ics 行事曆檔",
+                    data=ics_text,
+                    file_name=f"{detail.get('項目', 'event')}.ics",
+                    mime="text/calendar",
+                )
+
     st.divider()
     st.subheader("📋 近期實際行事與排休總覽清單")
     list_tab1, list_tab2 = st.tabs(["💼 實際工作行事清單", "🏖️ 同仁排休明細"])
@@ -290,7 +359,7 @@ if menu == "🗓️ 互動月曆視圖":
     with list_tab2:
         st.dataframe(df_schedules.tail(30).iloc[::-1], width="stretch")
 
-# ==================== 模組 1: 匯出每月綜合報表 (排班+行程+影印) ====================
+# ==================== 模組 1: 匯出每月綜合報表 ====================
 elif menu == "📤 匯出每月綜合報表":
     st.header("📤 每月工作行程、排班及影印報表輸出")
     st.info("💡 選擇年份與月份，可檢視當月排班、工作行事及影印總計，並支援下載整月份完整 Excel 活頁簿。")
@@ -304,7 +373,6 @@ elif menu == "📤 匯出每月綜合報表":
     _, num_days = py_calendar.monthrange(selected_year, selected_month)
     month_str = f"{selected_year}-{selected_month:02d}"
 
-    # 1. 班表整理
     df_schedules = load_data("schedules", ["employee_name", "leave_type", "start_date", "end_date"])
     roster_rows = []
     weekdays_zh = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
@@ -335,7 +403,6 @@ elif menu == "📤 匯出每月綜合報表":
 
     df_month_roster = pd.DataFrame(roster_rows)
 
-    # 2. 行事整理
     df_works = load_data("work_events", ["start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
     if not df_works.empty:
         df_month_events = df_works[
@@ -345,7 +412,6 @@ elif menu == "📤 匯出每月綜合報表":
     else:
         df_month_events = pd.DataFrame()
 
-    # 3. 影印紀錄整理與統計
     df_p_all = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
     if not df_p_all.empty:
         df_p_all["pages_num"] = pd.to_numeric(df_p_all["pages"], errors="coerce").fillna(0).astype(int)
@@ -379,7 +445,6 @@ elif menu == "📤 匯出每月綜合報表":
         else:
             st.info("該月份目前尚無影印輸出紀錄。")
 
-    # Excel 綜合輸出
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         df_month_roster.to_excel(writer, sheet_name="當月班表總覽", index=False)
@@ -534,14 +599,15 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 3: 工作行事登記 ====================
+# ==================== 模組 3: 工作行事登記 (含手機連動) ====================
 elif menu == "📌 工作行事登記":
-    st.header("📌 工作行事管理")
+    st.header("📌 工作行事管理與手機連動")
     tab_act_add, tab_act_edit = st.tabs(["➕ 新增工作行事", "✏️ 修改既有行事"])
 
     with tab_act_add:
         col_e1, col_e2 = st.columns([1, 2])
         with col_e1:
+            st.subheader("填寫工作行事")
             event_s_date = st.date_input("開始日期", value=date.today(), key="we_s_date")
             event_e_date = st.date_input("結束日期", min_value=event_s_date, value=event_s_date, key="we_e_date")
             t_col1, t_col2 = st.columns(2)
@@ -573,7 +639,31 @@ elif menu == "📌 工作行事登記":
                     st.success("工作行事已成功登記！")
                     st.rerun()
 
+            # 針對當前輸入的行事，直接產生手機連動連結
+            if event_title.strip():
+                st.divider()
+                st.markdown("##### 📲 立即加入手機行事曆")
+                cur_g_link = make_google_calendar_link(
+                    event_title, str(event_s_date), str(event_e_date),
+                    event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
+                    event_desc, event_pic
+                )
+                cur_ics = generate_ics_content(
+                    event_title, str(event_s_date), str(event_e_date),
+                    event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
+                    event_desc, event_pic
+                )
+                st.link_button("📅 加入 Google 日曆 (手機直接開啟)", cur_g_link)
+                st.download_button(
+                    label="🍏 下載 Apple 行事曆 (.ics)",
+                    data=cur_ics,
+                    file_name=f"{event_title}.ics",
+                    mime="text/calendar",
+                    key="dl_cur_ics"
+                )
+
         with col_e2:
+            st.subheader("📋 最新工作行事清單")
             df_w = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"])
             st.dataframe(df_w.tail(30).iloc[::-1], width="stretch")
 
@@ -623,6 +713,30 @@ elif menu == "📌 工作行事登記":
                     save_data("work_events", df_w)
                     st.success("工作行事已成功更新！")
                     st.rerun()
+
+                # 提供已儲存行程的手機同步連結
+                st.markdown("##### 📲 同步此行程至手機")
+                edit_g_link = make_google_calendar_link(
+                    str(w_curr["title"]), str(w_curr["start_date"]), str(w_curr["end_date"]),
+                    str(w_curr["start_time"]), str(w_curr["end_time"]),
+                    str(w_curr["description"]), str(w_curr["person_in_charge"])
+                )
+                edit_ics = generate_ics_content(
+                    str(w_curr["title"]), str(w_curr["start_date"]), str(w_curr["end_date"]),
+                    str(w_curr["start_time"]), str(w_curr["end_time"]),
+                    str(w_curr["description"]), str(w_curr["person_in_charge"])
+                )
+                col_e_m1, col_e_m2 = st.columns(2)
+                with col_e_m1:
+                    st.link_button("📅 加入 Google 日曆 (手機直接開啟)", edit_g_link)
+                with col_e_m2:
+                    st.download_button(
+                        label="🍏 下載 Apple 行事曆 (.ics)",
+                        data=edit_ics,
+                        file_name=f"{w_curr['title']}.ics",
+                        mime="text/calendar",
+                        key="dl_edit_ics"
+                    )
             else:
                 st.info("目前尚無有效的工作行事可供修改。")
         else:
@@ -719,7 +833,7 @@ elif menu == "📱 3C產品借用申請":
         else:
             st.info("目前尚無 3C 借用紀錄可供修改。")
 
-# ==================== 模組 5: 影印輸出登記 (新增每月統計與匯出) ====================
+# ==================== 模組 5: 影印輸出登記 ====================
 elif menu == "🖨️ 影印輸出登記":
     st.header("🖨️ 影印輸出登記與每月報表")
     tab_p_reg, tab_p_month = st.tabs(["📝 影印登記", "📊 每月影印統計與輸出"])
@@ -733,7 +847,7 @@ elif menu == "🖨️ 影印輸出登記":
                 p_pages = st.number_input("輸出張數", min_value=1, value=1, step=1)
             with col_p2:
                 p_type = st.selectbox("色彩規格", ["黑白", "彩色"])
-                p_purpose = st.text_input("輸出用途 (例如：會議簡報、評鑑資料)")
+                p_purpose = st.text_input("輸出用途")
             submit_print = st.form_submit_button("登記輸出")
 
             if submit_print:
@@ -771,7 +885,6 @@ elif menu == "🖨️ 影印輸出登記":
             cur_month_df = pd.DataFrame()
 
         if not cur_month_df.empty:
-            # 統計總張數與黑白彩色分佈
             summary = cur_month_df.groupby(["user_name", "print_type"])["pages_num"].sum().unstack(fill_value=0)
             for c in ["黑白", "彩色"]:
                 if c not in summary.columns:
@@ -797,7 +910,6 @@ elif menu == "🖨️ 影印輸出登記":
             )
             st.dataframe(disp_detail, width="stretch")
 
-            # Excel 匯出 (統計 + 明細 雙分頁)
             p_excel_buf = io.BytesIO()
             with pd.ExcelWriter(p_excel_buf, engine="openpyxl") as p_writer:
                 summary.to_excel(p_writer, sheet_name="同仁影印統計彙總", index=False)
