@@ -7,10 +7,17 @@ import sqlite3
 import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 import pandas as pd
 import streamlit as st
 from streamlit_calendar import calendar
+
+# 具備防呆保護的 Google 日曆 API 套件匯入
+try:
+    from googleapiclient.discovery import build
+    HAS_CALENDAR_LIB = True
+except ModuleNotFoundError:
+    build = None
+    HAS_CALENDAR_LIB = False
 
 # 預設固定名單與參數
 EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
@@ -96,7 +103,10 @@ def get_gspread_client():
 
 # ==================== 背景全自動寫入 Google 日曆核心函式 ====================
 def auto_sync_to_google_calendar(title, s_date, e_date, s_time, e_time, desc, pic):
-    """登記當下由系統背景全自動寫入 Google 日曆，無需點選任何連動按鈕"""
+    """登記當下由系統背景全自動寫入 Google 日曆，無需點選手動按鈕"""
+    if not HAS_CALENDAR_LIB:
+        return False, "尚未安裝 google-api-python-client 套件"
+
     try:
         calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
         if not calendar_id:
@@ -196,8 +206,10 @@ if sh_conn:
 else:
     st.sidebar.info("🟠 儲存狀態：本地安全儲存模式 (切換頁面不遺失)")
 
-if "calendar_id" in st.secrets:
+if "calendar_id" in st.secrets and HAS_CALENDAR_LIB:
     st.sidebar.success("📲 Google 日曆背景自動同步：已啟用")
+elif not HAS_CALENDAR_LIB:
+    st.sidebar.warning("⚠️ 系統正在載入日曆套件，請稍候重整")
 else:
     st.sidebar.warning("⚠️ Google 日曆背景自動同步：未設定 calendar_id")
 
@@ -561,7 +573,7 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 3: 工作行事登記 (登記當下全自動同步日曆) ====================
+# ==================== 模組 3: 工作行事登記 (全自動背景同步日曆) ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (登記即全自動同步手機日曆)")
     tab_act_add, tab_act_edit = st.tabs(["➕ 新增工作行事", "✏️ 修改既有行事"])
@@ -609,7 +621,7 @@ elif menu == "📌 工作行事登記":
                     if synced:
                         st.success("✅ 工作行事登記成功！已全自動同步至手機 Google 日曆！")
                     else:
-                        st.success(f"✅ 工作行事登記成功！(日曆同步提示：{sync_msg})")
+                        st.success(f"✅ 工作行事登記成功！(日曆同步狀態：{sync_msg})")
                     st.rerun()
 
         with col_e2:
