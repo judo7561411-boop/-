@@ -68,8 +68,8 @@ def load_local_fallback(sheet_name: str, default_cols: list) -> pd.DataFrame:
         pass
     return pd.DataFrame(columns=default_cols)
 
-def get_credentials():
-    """解析服務帳戶憑證"""
+def get_service_account_dict():
+    """解析服務帳戶原始字典"""
     service_account_info = None
     if "gcp_base64" in st.secrets:
         raw = str(st.secrets["gcp_base64"]).strip().strip('"').strip("'")
@@ -83,10 +83,14 @@ def get_credentials():
         raw_str = str(st.secrets["gcp_json"]).strip().strip("'''").strip('"""')
         if len(raw_str) > 20:
             service_account_info = json.loads(raw_str)
+    return service_account_info
 
-    if not service_account_info:
+def get_credentials():
+    """建立認證憑證"""
+    info = get_service_account_dict()
+    if not info:
         return None
-    return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+    return Credentials.from_service_account_info(info, scopes=SCOPES)
 
 @st.cache_resource
 def get_gspread_client():
@@ -110,7 +114,7 @@ def auto_sync_to_google_calendar(title, s_date, e_date, s_time, e_time, desc, pi
     try:
         calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
         if not calendar_id:
-            return False, "未在 Secrets 中設定 calendar_id（例如 calendar_id = 'judo7561411@gmail.com'）"
+            return False, "未在 Secrets 中設定 calendar_id"
 
         creds = get_credentials()
         if not creds:
@@ -574,14 +578,21 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 3: 工作行事登記 (含日曆連線診斷測試) ====================
+# ==================== 模組 3: 工作行事登記 (含身分透視診斷) ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (登記即全自動同步 Google 日曆)")
 
-    # 日曆連線即時診斷區塊
+    # 日曆連線即時身分透視與測試區塊
     with st.expander("🛠️ Google 日曆連線診斷與即時測試 (點此展開)"):
         cal_target = st.secrets.get("calendar_id", "尚未設定")
-        st.write(f"**目標日曆 ID：** `{cal_target}`")
+        sa_dict = get_service_account_dict()
+        current_sa_email = sa_dict.get("client_email", "無法解析電子郵件") if sa_dict else "未設定"
+        
+        st.markdown(f"**🎯 目標日曆 ID：** `{cal_target}`")
+        st.markdown(f"**🔑 程式正在使用的服務帳戶 Email：**")
+        st.code(current_sa_email, language="text")
+        st.info("💡 請確認上面這串【程式正在使用的服務帳戶 Email】是否已經精準加入到你的 Google 日曆共用名單中（並賦予『進行變更』權限）。")
+
         if st.button("🚀 立即發送一筆測試活動至日曆"):
             t_now = datetime.now()
             t_start = (t_now + timedelta(minutes=5)).strftime("%H:%M")
@@ -618,7 +629,6 @@ elif menu == "📌 工作行事登記":
                 elif event_s_date == event_e_date and event_s_time >= event_e_time:
                     st.error("同一天活動的結束時間必須晚於開始時間！")
                 else:
-                    # 1. 寫入試算表與本地備援
                     df_w = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description"])
                     valid_ids = pd.to_numeric(df_w["id"], errors="coerce").dropna()
                     new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
@@ -630,7 +640,6 @@ elif menu == "📌 工作行事登記":
                     df_w = pd.concat([df_w, new_row], ignore_index=True)
                     save_data("work_events", df_w)
 
-                    # 2. 系統背景全自動寫入 Google 日曆 (保留提示不立即閃退)
                     synced, sync_msg = auto_sync_to_google_calendar(
                         event_title, str(event_s_date), str(event_e_date),
                         event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
@@ -692,7 +701,6 @@ elif menu == "📌 工作行事登記":
                     ]
                     save_data("work_events", df_w)
 
-                    # 修改後全自動同步加入日曆
                     synced, sync_msg = auto_sync_to_google_calendar(
                         new_w_title, str(new_w_sd), str(new_w_ed),
                         new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"),
