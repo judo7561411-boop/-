@@ -38,8 +38,10 @@ SCOPES = [
 # 台灣標準時區 (UTC+8)
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-# 工作行事標準欄位 (包含 google_event_id 用於連動修改)
+# 各資料表標準欄位定義 (皆包含 google_event_id 支援日曆連動與修改)
 WORK_EVENT_COLS = ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description", "google_event_id"]
+SCHEDULE_COLS = ["id", "employee_name", "leave_type", "start_datetime", "end_datetime", "start_date", "end_date", "note", "google_event_id"]
+SWAP_COLS = ["id", "swap_date", "employee_name", "assigned_shift", "reason", "google_event_id"]
 
 # 初始化本地備援資料庫
 def init_local_fallback():
@@ -110,54 +112,46 @@ def get_gspread_client():
     except Exception:
         return None
 
-# ==================== Google 日曆雙向智慧同步核心函式 (支援新增與連動修改) ====================
-def sync_or_update_google_calendar(title, s_date, e_date, s_time, e_time, desc, pic, existing_cal_id=""):
+# ==================== Google 日曆通用寫入/更新核心函式 ====================
+def sync_event_to_google_calendar(summary, description, s_date, e_date, s_time, e_time, existing_cal_id=""):
     """
-    智慧同步函式：
-    若 existing_cal_id 存在，則呼叫 API 直接更新該日曆活動；
-    若不存在或更新失敗，則新建活動並回傳新產生的 eventId。
+    通用日曆同步：支援工作、休假、調班。
+    若 existing_cal_id 存在則執行 Update，否則執行 Insert，並附帶手機提醒通知。
     """
     if not HAS_CALENDAR_LIB:
-        return False, "", "伺服器缺少日曆套件，請稍候重整"
+        return False, "", "缺少日曆套件"
 
     try:
         calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
         if not calendar_id:
-            return False, "", "未在 Secrets 中設定 calendar_id"
+            return False, "", "未設定 calendar_id"
 
         creds = get_credentials()
         if not creds:
-            return False, "", "無法取得 Google 服務帳戶憑證"
+            return False, "", "無法取得憑證"
 
         service = build("calendar", "v3", credentials=creds)
 
-        # 嚴格組裝 ISO 8601 格式並帶入台灣標準時區位移 (+08:00)
         start_rfc = f"{s_date}T{s_time}:00+08:00"
         end_rfc = f"{e_date}T{e_time}:00+08:00"
 
         event_body = {
-            "summary": f"[{pic}] {title}",
-            "description": f"負責人：{pic}\n內容說明：{desc}\n\n(此行程由內部行政系統全自動同步建立與維護)",
-            "start": {
-                "dateTime": start_rfc,
-                "timeZone": "Asia/Taipei",
-            },
-            "end": {
-                "dateTime": end_rfc,
-                "timeZone": "Asia/Taipei",
-            },
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_rfc, "timeZone": "Asia/Taipei"},
+            "end": {"dateTime": end_rfc, "timeZone": "Asia/Taipei"},
             "reminders": {
                 "useDefault": False,
                 "overrides": [
-                    {"method": "popup", "minutes": 15},
-                    {"method": "popup", "minutes": 60}
+                    {"method": "popup", "minutes": 15},   # 活動前 15 分鐘通知
+                    {"method": "popup", "minutes": 720}   # 活動前 12 小時 (前一天晚上) 通知
                 ],
             },
         }
 
         cal_event_id = str(existing_cal_id).strip()
 
-        # 情境一：既有行程連動修改 (Update)
+        # 既有行程更新
         if cal_event_id:
             try:
                 updated_event = service.events().update(
@@ -165,53 +159,81 @@ def sync_or_update_google_calendar(title, s_date, e_date, s_time, e_time, desc, 
                     eventId=cal_event_id,
                     body=event_body
                 ).execute()
-                return True, updated_event.get("id", cal_event_id), "成功連動更新手機 Google 日曆行程！"
+                return True, updated_event.get("id", cal_event_id), "日曆活動已更新"
             except Exception:
-                # 若日曆端原活動被手動刪除，自動降級重新建立
                 pass
 
-        # 情境二：新增行程 (Insert)
+        # 全新建立
         created_event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-        new_cal_id = created_event.get("id", "")
-        return True, new_cal_id, "成功建立並自動同步至手機 Google 日曆！"
+        return True, created_event.get("id", ""), "日曆活動已建立"
     except Exception as e:
         return False, "", f"日曆同步失敗：{e}"
 
-def batch_sync_existing_events_to_google_calendar():
-    """批次將現存所有工作行事同步至 Google 日曆並回填 ID"""
+def batch_sync_all_to_google_calendar():
+    """全面批次同步：工作行程 + 同仁排休 + 臨時調班"""
     calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
     if not calendar_id:
         return 0, 0, "未在 Secrets 中設定 calendar_id"
 
+    success_cnt = 0
+    fail_cnt = 0
+
+    # 1. 同步工作行事
     df_w = load_data("work_events", WORK_EVENT_COLS)
-    if df_w.empty:
-        return 0, 0, "目前系統中無任何既有工作行事紀錄"
-
-    success_count = 0
-    fail_count = 0
-
-    for idx, row in df_w.iterrows():
-        title = str(row.get("title", "")).strip()
+    for idx, r in df_w.iterrows():
+        title = str(r.get("title", "")).strip()
         if not title:
             continue
-        
-        s_date = str(row.get("start_date", "")).strip()
-        e_date = str(row.get("end_date", "")).strip() if str(row.get("end_date", "")).strip() else s_date
-        s_time = str(row.get("start_time", "09:00")).strip()
-        e_time = str(row.get("end_time", "10:00")).strip()
-        desc = str(row.get("description", "")).strip()
-        pic = str(row.get("person_in_charge", "全體")).strip()
-        cal_id = str(row.get("google_event_id", "")).strip()
-
-        ok, new_id, _ = sync_or_update_google_calendar(title, s_date, e_date, s_time, e_time, desc, pic, cal_id)
+        s_d = str(r.get("start_date", "")).strip()
+        e_d = str(r.get("end_date", "")).strip() if str(r.get("end_date", "")).strip() else s_d
+        s_t = str(r.get("start_time", "09:00")).strip()
+        e_t = str(r.get("end_time", "10:00")).strip()
+        desc = f"負責人：{r.get('person_in_charge', '全體')}\n說明：{r.get('description', '')}"
+        ok, new_id, _ = sync_event_to_google_calendar(f"💼 [{r.get('person_in_charge', '全體')}] {title}", desc, s_d, e_d, s_t, e_t, r.get("google_event_id", ""))
         if ok:
             df_w.at[idx, "google_event_id"] = new_id
-            success_count += 1
+            success_cnt += 1
         else:
-            fail_count += 1
-
+            fail_cnt += 1
     save_data("work_events", df_w)
-    return success_count, fail_count, "批次同步完成"
+
+    # 2. 同步同仁排休
+    df_sch = load_data("schedules", SCHEDULE_COLS)
+    for idx, r in df_sch.iterrows():
+        emp = str(r.get("employee_name", "")).strip()
+        if not emp:
+            continue
+        s_d = str(r.get("start_date", "")).strip()
+        e_d = str(r.get("end_date", "")).strip() if str(r.get("end_date", "")).strip() else s_d
+        desc = f"請假同仁：{emp}\n假別：{r.get('leave_type', '')}\n原因備註：{r.get('note', '')}"
+        ok, new_id, _ = sync_event_to_google_calendar(f"🏖️ [排休-{r.get('leave_type', '')}] {emp}", desc, s_d, e_d, "08:00", "17:00", r.get("google_event_id", ""))
+        if ok:
+            df_sch.at[idx, "google_event_id"] = new_id
+            success_cnt += 1
+        else:
+            fail_cnt += 1
+    save_data("schedules", df_sch)
+
+    # 3. 同步臨時調班
+    df_swaps = load_data("shift_swaps", SWAP_COLS)
+    for idx, r in df_swaps.iterrows():
+        emp = str(r.get("employee_name", "")).strip()
+        if not emp:
+            continue
+        s_d = str(r.get("swap_date", "")).strip()
+        shift = str(r.get("assigned_shift", ""))
+        s_t = "08:00" if "A" in shift else "08:30"
+        e_t = "16:30" if "A" in shift else "17:00"
+        desc = f"調班同仁：{emp}\n調整班別：{shift}\n事由：{r.get('reason', '')}"
+        ok, new_id, _ = sync_event_to_google_calendar(f"🔄 [調班] {emp} -> {shift}", desc, s_d, s_d, s_t, e_t, r.get("google_event_id", ""))
+        if ok:
+            df_swaps.at[idx, "google_event_id"] = new_id
+            success_cnt += 1
+        else:
+            fail_cnt += 1
+    save_data("shift_swaps", df_swaps)
+
+    return success_cnt, fail_cnt, "全面同步完成"
 
 def get_worksheet(sheet_name: str, default_cols: list):
     sh = get_gspread_client()
@@ -274,11 +296,11 @@ else:
     st.sidebar.info("🟠 儲存狀態：本地安全儲存模式 (切換頁面不遺失)")
 
 if "calendar_id" in st.secrets and HAS_CALENDAR_LIB:
-    st.sidebar.success(f"📲 Google 日曆雙向自動同步：已啟用 ({st.secrets['calendar_id']})")
+    st.sidebar.success(f"📲 Google 日曆雙向同步：已啟用 ({st.secrets['calendar_id']})")
 elif not HAS_CALENDAR_LIB:
-    st.sidebar.warning("⚠️ 系統正在安裝日曆依賴套件，請稍候重整")
+    st.sidebar.warning("⚠️ 系統正在載入日曆套件，請稍候重整")
 else:
-    st.sidebar.warning("⚠️ Google 日曆自動同步：未在 Secrets 設定 calendar_id")
+    st.sidebar.warning("⚠️ Google 日曆同步：未在 Secrets 設定 calendar_id")
 
 menu = st.sidebar.radio(
     "系統模組切換",
@@ -301,23 +323,25 @@ def get_daily_roster(query_date_str):
     else:
         roster = {"美釵": "A班", "伊臻": "B班", "涵玟": "B班", "勝順": "未排班"}
 
-    df_swaps = load_data("shift_swaps", ["swap_date", "employee_name", "assigned_shift", "reason"])
+    df_swaps = load_data("shift_swaps", SWAP_COLS)
     if not df_swaps.empty:
         swaps = df_swaps[df_swaps["swap_date"].astype(str) == str(query_date_str)]
         for _, row in swaps.iterrows():
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 ====================
+# ==================== 模組 0: 互動月曆視圖 (整合休假、調班與行事) ====================
 if menu == "🗓️ 互動月曆視圖":
-    st.header("🗓️ 整合工作行事與同仁排休月曆")
-    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】。點擊月曆方塊可在下方查看詳細內容。")
+    st.header("🗓️ 整合工作行事、排休與調班月曆")
+    st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】，紫色代表【臨時調班】。點擊方塊可查看詳細說明。")
 
-    df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"])
+    df_schedules = load_data("schedules", SCHEDULE_COLS)
     df_works = load_data("work_events", WORK_EVENT_COLS)
+    df_swaps = load_data("shift_swaps", SWAP_COLS)
 
     calendar_events = []
 
+    # 1. 排休事件
     for _, row in df_schedules.iterrows():
         if not str(row["employee_name"]).strip():
             continue
@@ -340,6 +364,29 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
+    # 2. 調班事件
+    for _, row in df_swaps.iterrows():
+        if not str(row["employee_name"]).strip():
+            continue
+        sw_d = str(row["swap_date"]).strip()
+        calendar_events.append({
+            "title": f"🔄 {row['employee_name']} 換至 {row['assigned_shift']}",
+            "start": sw_d,
+            "end": sw_d,
+            "backgroundColor": "#8E24AA",
+            "borderColor": "#8E24AA",
+            "textColor": "#FFFFFF",
+            "extendedProps": {
+                "類別": "🔄 臨時調班",
+                "對象": str(row["employee_name"]),
+                "項目": f"變更班別為 {row['assigned_shift']}",
+                "日期區間": sw_d,
+                "時間明細": "全日班別調整",
+                "詳細內容/備註": str(row["reason"]) if str(row["reason"]).strip() else "無填寫調班事由",
+            },
+        })
+
+    # 3. 工作行事
     for _, row in df_works.iterrows():
         if not str(row["title"]).strip():
             continue
@@ -391,19 +438,21 @@ if menu == "🗓️ 互動月曆視圖":
         st.markdown(f"### 📌 事項詳情：{detail.get('項目', '')}")
         col_c1, col_c2, col_c3 = st.columns(3)
         col_c1.metric("類別與性質", detail.get("類別", ""))
-        col_c2.metric("負責人 / 請假同仁", detail.get("對象", ""))
+        col_c2.metric("對象 / 負責同仁", detail.get("對象", ""))
         col_c3.metric("時間時段", detail.get("時間明細", ""))
-        st.markdown(f"**🗓️ 活動日期：** `{detail.get('日期區間', '')}`")
-        st.markdown("**📝 內容與說明：**")
+        st.markdown(f"**🗓️ 日期區間：** `{detail.get('日期區間', '')}`")
+        st.markdown("**📝 內容與備註說明：**")
         st.info(detail.get("詳細內容/備註", "無"))
 
     st.divider()
-    st.subheader("📋 近期實際行事與排休總覽清單")
-    list_tab1, list_tab2 = st.tabs(["💼 實際工作行事清單", "🏖️ 同仁排休明細"])
+    st.subheader("📋 近期排休、調班與行事總覽清單")
+    list_tab1, list_tab2, list_tab3 = st.tabs(["🏖️ 同仁排休明細", "🔄 臨時調班紀錄", "💼 實際工作行事清單"])
     with list_tab1:
-        st.dataframe(df_works.tail(30).iloc[::-1], width="stretch")
+        st.dataframe(df_schedules[["id", "employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"]].tail(30).iloc[::-1], width="stretch")
     with list_tab2:
-        st.dataframe(df_schedules.tail(30).iloc[::-1], width="stretch")
+        st.dataframe(df_swaps[["id", "swap_date", "employee_name", "assigned_shift", "reason"]].tail(30).iloc[::-1], width="stretch")
+    with list_tab3:
+        st.dataframe(df_works[["id", "start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"]].tail(30).iloc[::-1], width="stretch")
 
 # ==================== 模組 1: 匯出每月綜合報表 ====================
 elif menu == "📤 匯出每月綜合報表":
@@ -417,7 +466,7 @@ elif menu == "📤 匯出每月綜合報表":
     _, num_days = py_calendar.monthrange(selected_year, selected_month)
     month_str = f"{selected_year}-{selected_month:02d}"
 
-    df_schedules = load_data("schedules", ["employee_name", "leave_type", "start_date", "end_date"])
+    df_schedules = load_data("schedules", SCHEDULE_COLS)
     roster_rows = []
     weekdays_zh = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
 
@@ -510,18 +559,19 @@ elif menu == "📤 匯出每月綜合報表":
             mime="text/csv",
         )
 
-# ==================== 模組 2: 班表、排休與調班 ====================
+# ==================== 模組 2: 班表、排休與調班 (含自動連動 Google 日曆及提醒) ====================
 elif menu == "📅 班表、排休與調班":
-    st.header("📅 班表排班、排休與調班管理")
+    st.header("📅 班表排班、排休與調班 (支援即時自動連動 Google 日曆與提醒)")
+
     tab_leave, tab_edit_leave, tab_swap, tab_schedule_view = st.tabs(
         ["📝 請假/排休登記", "✏️ 修改排休紀錄", "🔄 臨時調班申請", "👀 當日班表與休假查詢"]
     )
 
     with tab_leave:
-        st.subheader("新增排休 (每日限制請假最多 1 人)")
+        st.subheader("新增排休 (每日限制最多 1 人，登記自動寫入手機日曆)")
         col_l1, col_l2 = st.columns(2)
         with col_l1:
-            emp = st.selectbox("請假人", EMPLOYEES, key="leave_emp")
+            emp = st.selectbox("請假同仁", EMPLOYEES, key="leave_emp")
             l_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], key="leave_type")
             s_date = st.date_input("開始休假日期", min_value=date.today())
             s_time = st.time_input("開始休假時間", value=time(8, 0))
@@ -537,7 +587,7 @@ elif menu == "📅 班表、排休與調班":
             if datetime.strptime(start_dt_str, "%Y-%m-%d %H:%M") >= datetime.strptime(end_dt_str, "%Y-%m-%d %H:%M"):
                 st.error("結束時間必須晚於開始時間！")
             else:
-                df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_datetime", "end_datetime", "start_date", "end_date", "note"])
+                df_schedules = load_data("schedules", SCHEDULE_COLS)
                 conflict = False
                 if not df_schedules.empty:
                     c_rows = df_schedules[
@@ -550,21 +600,34 @@ elif menu == "📅 班表、排休與調班":
                         st.error(f"⚠️ 無法登記！當日已有同仁排休：{conflict_info}。依規定每日僅限 1 人排休。")
 
                 if not conflict:
+                    # 1. 系統背景自動同步至 Google 日曆 (附帶提前 12 小時與活動前提醒)
+                    summary = f"🏖️ [排休-{l_type}] {emp}"
+                    desc = f"請假同仁：{emp}\n假別：{l_type}\n時間：{start_dt_str} 至 {end_dt_str}\n原因備註：{l_note}"
+                    synced, cal_id, sync_msg = sync_event_to_google_calendar(
+                        summary, desc, str(s_date), str(e_date), s_time.strftime("%H:%M"), e_time.strftime("%H:%M")
+                    )
+
+                    # 2. 寫入資料庫
                     valid_ids = pd.to_numeric(df_schedules["id"], errors="coerce").dropna()
                     new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
                     new_row = pd.DataFrame([{
                         "id": str(new_id), "employee_name": emp, "leave_type": l_type,
                         "start_datetime": start_dt_str, "end_datetime": end_dt_str,
-                        "start_date": str(s_date), "end_date": str(e_date), "note": str(l_note)
+                        "start_date": str(s_date), "end_date": str(e_date), "note": str(l_note),
+                        "google_event_id": str(cal_id)
                     }])
                     df_schedules = pd.concat([df_schedules, new_row], ignore_index=True)
                     save_data("schedules", df_schedules)
-                    st.success("排休登記成功！已安全儲存。")
+
+                    if synced:
+                        st.success(f"✅ 排休登記成功！已全自動同步至手機 Google 日曆並排定提醒！")
+                    else:
+                        st.success("✅ 排休登記成功！(日曆同步已留存備援)")
                     st.rerun()
 
     with tab_edit_leave:
-        st.subheader("✏️ 修改或更新排休紀錄")
-        df_schedules = load_data("schedules", ["id", "employee_name", "leave_type", "start_date", "end_date", "note"])
+        st.subheader("✏️ 修改排休紀錄 (連動更新 Google 日曆)")
+        df_schedules = load_data("schedules", SCHEDULE_COLS)
         if not df_schedules.empty and len(df_schedules) > 0:
             record_options = {
                 f"編號 {r['id']} | {r['employee_name']} - {r['leave_type']} ({r['start_date']} ~ {r['end_date']})": str(r['id'])
@@ -592,14 +655,23 @@ elif menu == "📅 班表、排休與調班":
                     edit_ed = st.date_input("結束休假日期", value=cur_ed, min_value=edit_sd, key="ed_l_ed")
                     edit_note = st.text_input("原因備註", value=str(curr["note"]), key="ed_l_note")
 
-                if st.button("確認儲存修改", key="btn_save_edit_leave"):
+                if st.button("確認儲存修改並更新日曆", key="btn_save_edit_leave"):
                     s_dt = f"{edit_sd} 08:00"
                     e_dt = f"{edit_ed} 17:00"
-                    df_schedules.loc[df_schedules["id"].astype(str) == target_id, ["employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note"]] = [
-                        edit_emp, edit_type, str(edit_sd), str(edit_ed), s_dt, e_dt, str(edit_note)
+                    existing_cal_id = str(curr.get("google_event_id", "")).strip()
+
+                    # 連動修改日曆
+                    summary = f"🏖️ [排休-{edit_type}] {edit_emp}"
+                    desc = f"請假同仁：{edit_emp}\n假別：{edit_type}\n時間：{s_dt} 至 {e_dt}\n原因備註：{edit_note}"
+                    synced, final_cal_id, _ = sync_event_to_google_calendar(
+                        summary, desc, str(edit_sd), str(edit_ed), "08:00", "17:00", existing_cal_id=existing_cal_id
+                    )
+
+                    df_schedules.loc[df_schedules["id"].astype(str) == target_id, ["employee_name", "leave_type", "start_date", "end_date", "start_datetime", "end_datetime", "note", "google_event_id"]] = [
+                        edit_emp, edit_type, str(edit_sd), str(edit_ed), s_dt, e_dt, str(edit_note), str(final_cal_id)
                     ]
                     save_data("schedules", df_schedules)
-                    st.success("排休資料已成功修改！")
+                    st.success("排休資料已成功修改，且 Google 日曆已即時連動更新！")
                     st.rerun()
             else:
                 st.info("目前尚無有效的排休紀錄可供修改。")
@@ -607,7 +679,7 @@ elif menu == "📅 班表、排休與調班":
             st.info("目前尚無任何排休紀錄可供修改。")
 
     with tab_swap:
-        st.subheader("臨時調班登記")
+        st.subheader("臨時調班登記 (自動連動至 Google 日曆並提醒)")
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             swap_d = st.date_input("調班日期", key="swap_date")
@@ -616,19 +688,54 @@ elif menu == "📅 班表、排休與調班":
             new_shift = st.selectbox("變更為班別", ["A班 (08:00-16:30)", "B班 (08:30-17:00)", "休假/不排班"])
             swap_reason = st.text_input("調班事由")
 
-        if st.button("確認調班"):
-            df_swaps = load_data("shift_swaps", ["swap_date", "employee_name", "assigned_shift", "reason"])
+        if st.button("確認調班並同步日曆"):
+            assigned = str(new_shift.split(" ")[0])
+            s_t = "08:00" if "A" in assigned else "08:30"
+            e_t = "16:30" if "A" in assigned else "17:00"
+
+            # 同步至 Google 日曆
+            summary = f"🔄 [調班] {swap_emp} -> {assigned}"
+            desc = f"調班同仁：{swap_emp}\n變更為：{assigned}\n日期：{swap_d}\n事由：{swap_reason}"
+            synced, cal_id, _ = sync_event_to_google_calendar(
+                summary, desc, str(swap_d), str(swap_d), s_t, e_t
+            )
+
+            df_swaps = load_data("shift_swaps", SWAP_COLS)
             if not df_swaps.empty:
                 df_swaps = df_swaps[~((df_swaps["swap_date"].astype(str) == str(swap_d)) & (df_swaps["employee_name"].astype(str) == str(swap_emp)))]
-            new_swap = pd.DataFrame([{"swap_date": str(swap_d), "employee_name": str(swap_emp), "assigned_shift": str(new_shift.split(" ")[0]), "reason": str(swap_reason)}])
+            valid_ids = pd.to_numeric(df_swaps["id"], errors="coerce").dropna()
+            new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
+            new_swap = pd.DataFrame([{
+                "id": str(new_id), "swap_date": str(swap_d), "employee_name": str(swap_emp),
+                "assigned_shift": assigned, "reason": str(swap_reason),
+                "google_event_id": str(cal_id)
+            }])
             df_swaps = pd.concat([df_swaps, new_swap], ignore_index=True)
             save_data("shift_swaps", df_swaps)
-            st.success(f"{swap_d} {swap_emp} 已成功調整為 {new_shift.split(' ')[0]}！")
+            st.success(f"✅ {swap_d} {swap_emp} 已成功調整為 {assigned}，並已同步至 Google 日曆！")
+            st.rerun()
 
     with tab_schedule_view:
-        st.subheader("查詢當日實際班表")
+        st.subheader("查詢當日實際班表與提醒")
         check_date = st.date_input("選擇欲查詢日期", value=date.today())
         daily_shifts = get_daily_roster(str(check_date))
+
+        # 當日休假提示
+        df_sch_check = load_data("schedules", SCHEDULE_COLS)
+        today_leaves = df_sch_check[
+            (df_sch_check["start_date"].astype(str) <= str(check_date)) &
+            (df_sch_check["end_date"].astype(str) >= str(check_date))
+        ]
+        if not today_leaves.empty:
+            for _, lv in today_leaves.iterrows():
+                st.warning(f"🏖️ 休假提醒：**{lv['employee_name']}** 今日請【{lv['leave_type']}假】 (原因: {lv['note']})")
+
+        # 當日調班提示
+        df_sw_check = load_data("shift_swaps", SWAP_COLS)
+        today_swaps = df_sw_check[df_sw_check["swap_date"].astype(str) == str(check_date)]
+        if not today_swaps.empty:
+            for _, sw in today_swaps.iterrows():
+                st.info(f"🔄 調班提醒：**{sw['employee_name']}** 今日臨時調整為【{sw['assigned_shift']}】 (原因: {sw['reason']})")
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -640,24 +747,23 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 3: 工作行事登記 (支援新增自動連動 + 修改即時更新) ====================
+# ==================== 模組 3: 工作行事登記 (支援全方位批次同步) ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (新增/修改均即時全自動同步 Google 日曆)")
 
-    # 批次同步現存所有既有行程至 Google 日曆
-    with st.expander("🔄 批次將現存已登記的所有行事同步至 Google 日曆 (點此展開)"):
-        st.write("點擊下方按鈕可一次性將所有工作行程同步/更新至 Google 日曆中：")
+    with st.expander("🔄 批次將現存所有「行事+排休+調班」同步至 Google 日曆 (點此展開)"):
+        st.write("點擊下方按鈕可一次性將系統內的所有工作行程、同仁排休與臨時調班全面同步至 Google 日曆並開啟手機提醒：")
         col_b1, col_b2 = st.columns([1, 2])
         with col_b1:
-            if st.button("🚀 立即批次同步所有行程至 Google 日曆"):
-                with st.spinner("正在逐筆處理中，請稍候..."):
-                    succ, fail, b_msg = batch_sync_existing_events_to_google_calendar()
+            if st.button("🚀 立即全面批次同步至 Google 日曆"):
+                with st.spinner("正在逐筆寫入 Google 日曆中，請稍候..."):
+                    succ, fail, b_msg = batch_sync_all_to_google_calendar()
                 if succ > 0:
-                    st.success(f"🎉 批次同步成功！共完成 {succ} 筆行程至 Google 日曆 (失敗 {fail} 筆)。")
+                    st.success(f"🎉 全面同步成功！共完成 {succ} 筆行程/排休/調班至 Google 日曆 (失敗 {fail} 筆)。")
                 else:
                     st.warning(f"提示：{b_msg} (成功 {succ} 筆, 失敗 {fail} 筆)")
         with col_b2:
-            st.caption("註：系統會將所有行程設定在台灣時間 (UTC+8) 的對應時段中，並保留連動 ID。")
+            st.caption("註：系統會將所有項目自動設定在台灣時間 (UTC+8)，並預設活動前 15 分鐘與 12 小時發出手機提醒。")
 
     tab_act_add, tab_act_edit = st.tabs(["➕ 新增工作行事", "✏️ 修改既有行事"])
 
@@ -684,14 +790,13 @@ elif menu == "📌 工作行事登記":
                 elif event_s_date == event_e_date and event_s_time >= event_e_time:
                     st.error("同一天活動的結束時間必須晚於開始時間！")
                 else:
-                    # 1. 系統背景全自動寫入 Google 日曆，並獲取 eventId
-                    synced, cal_id, sync_msg = sync_or_update_google_calendar(
-                        event_title, str(event_s_date), str(event_e_date),
-                        event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
-                        event_desc, event_pic
+                    summary = f"💼 [{event_pic}] {event_title}"
+                    desc = f"負責人：{event_pic}\n內容說明：{event_desc}"
+                    synced, cal_id, sync_msg = sync_event_to_google_calendar(
+                        summary, desc, str(event_s_date), str(event_e_date),
+                        event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M")
                     )
 
-                    # 2. 寫入試算表與本地備援 (包含 google_event_id)
                     df_w = load_data("work_events", WORK_EVENT_COLS)
                     valid_ids = pd.to_numeric(df_w["id"], errors="coerce").dropna()
                     new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
@@ -716,9 +821,8 @@ elif menu == "📌 工作行事登記":
             disp_cols = ["id", "start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"]
             st.dataframe(df_w[disp_cols].tail(30).iloc[::-1], width="stretch")
 
-    # ==================== 修改既有行事：連動修改 Google 日曆 ====================
     with tab_act_edit:
-        st.subheader("✏️ 修改工作行事 (將連動修改手機 Google 日曆)")
+        st.subheader("✏️ 修改工作行事 (連動更新 Google 日曆)")
         df_w = load_data("work_events", WORK_EVENT_COLS)
         if not df_w.empty and len(df_w) > 0:
             w_options = {
@@ -759,16 +863,14 @@ elif menu == "📌 工作行事登記":
 
                 if st.button("確認儲存並連動修改日曆", key="btn_save_edit_work"):
                     existing_cal_id = str(w_curr.get("google_event_id", "")).strip()
-
-                    # 1. 呼叫 Google Calendar API 進行連動更新 (Update)
-                    synced, final_cal_id, sync_msg = sync_or_update_google_calendar(
-                        new_w_title, str(new_w_sd), str(new_w_ed),
+                    summary = f"💼 [{new_w_pic}] {new_w_title}"
+                    desc = f"負責人：{new_w_pic}\n內容說明：{new_w_desc}"
+                    synced, final_cal_id, sync_msg = sync_event_to_google_calendar(
+                        summary, desc, str(new_w_sd), str(new_w_ed),
                         new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"),
-                        new_w_desc, new_w_pic,
                         existing_cal_id=existing_cal_id
                     )
 
-                    # 2. 更新資料庫中該筆行事資料與 eventId
                     df_w.loc[df_w["id"].astype(str) == target_w_id, ["title", "person_in_charge", "start_date", "end_date", "start_time", "end_time", "description", "google_event_id"]] = [
                         str(new_w_title), str(new_w_pic), str(new_w_sd), str(new_w_ed), new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"), str(new_w_desc), str(final_cal_id)
                     ]
