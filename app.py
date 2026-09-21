@@ -103,9 +103,9 @@ def get_gspread_client():
 
 # ==================== 背景全自動寫入 Google 日曆核心函式 ====================
 def auto_sync_to_google_calendar(title, s_date, e_date, s_time, e_time, desc, pic):
-    """登記當下由系統背景全自動寫入 Google 日曆，無需點選手動按鈕"""
+    """登記當下由系統背景全自動寫入 Google 日曆，採用標準 ISO+時區格式"""
     if not HAS_CALENDAR_LIB:
-        return False, "尚未安裝 google-api-python-client 套件"
+        return False, "伺服器正在安裝 google-api-python-client，請稍候重整"
 
     try:
         calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
@@ -114,16 +114,17 @@ def auto_sync_to_google_calendar(title, s_date, e_date, s_time, e_time, desc, pi
 
         creds = get_credentials()
         if not creds:
-            return False, "無法取得認證憑證"
+            return False, "無法取得 Google 服務帳戶憑證"
 
         service = build("calendar", "v3", credentials=creds)
 
-        start_rfc = f"{s_date}T{s_time}:00"
-        end_rfc = f"{e_date}T{e_time}:00"
+        # 標準化 ISO 8601 時間字串並附加台灣時區 (+08:00)
+        start_rfc = f"{s_date}T{s_time}:00+08:00"
+        end_rfc = f"{e_date}T{e_time}:00+08:00"
 
         event_body = {
             "summary": f"[{pic}] {title}",
-            "description": f"負責人：{pic}\n說明：{desc}\n(此行程由內部行政系統全自動建立)",
+            "description": f"負責人：{pic}\n內容說明：{desc}\n\n(此行程由內部行政系統全自動同步建立)",
             "start": {
                 "dateTime": start_rfc,
                 "timeZone": "Asia/Taipei",
@@ -141,10 +142,11 @@ def auto_sync_to_google_calendar(title, s_date, e_date, s_time, e_time, desc, pi
             },
         }
 
-        service.events().insert(calendarId=calendar_id, body=event_body).execute()
-        return True, "成功自動同步至手機 Google 日曆！"
+        created_event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+        event_link = created_event.get("htmlLink", "")
+        return True, f"成功同步至 Google 日曆！活動 ID: {created_event.get('id', '')}"
     except Exception as e:
-        return False, str(e)
+        return False, f"日曆同步失敗：{e}"
 
 def get_worksheet(sheet_name: str, default_cols: list):
     sh = get_gspread_client()
@@ -207,11 +209,11 @@ else:
     st.sidebar.info("🟠 儲存狀態：本地安全儲存模式 (切換頁面不遺失)")
 
 if "calendar_id" in st.secrets and HAS_CALENDAR_LIB:
-    st.sidebar.success("📲 Google 日曆背景自動同步：已啟用")
+    st.sidebar.success(f"📲 Google 日曆自動同步：已啟用 ({st.secrets['calendar_id']})")
 elif not HAS_CALENDAR_LIB:
-    st.sidebar.warning("⚠️ 系統正在載入日曆套件，請稍候重整")
+    st.sidebar.warning("⚠️ 系統正在安裝日曆依賴套件，請稍候重整")
 else:
-    st.sidebar.warning("⚠️ Google 日曆背景自動同步：未設定 calendar_id")
+    st.sidebar.warning("⚠️ Google 日曆自動同步：未在 Secrets 設定 calendar_id")
 
 menu = st.sidebar.radio(
     "系統模組切換",
@@ -600,6 +602,7 @@ elif menu == "📌 工作行事登記":
                 elif event_s_date == event_e_date and event_s_time >= event_e_time:
                     st.error("同一天活動的結束時間必須晚於開始時間！")
                 else:
+                    # 1. 寫入試算表與本地備援
                     df_w = load_data("work_events", ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description"])
                     valid_ids = pd.to_numeric(df_w["id"], errors="coerce").dropna()
                     new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
@@ -611,7 +614,7 @@ elif menu == "📌 工作行事登記":
                     df_w = pd.concat([df_w, new_row], ignore_index=True)
                     save_data("work_events", df_w)
 
-                    # 系統背景直接全自動同步至手機 Google 日曆
+                    # 2. 系統背景全自動寫入 Google 日曆
                     synced, sync_msg = auto_sync_to_google_calendar(
                         event_title, str(event_s_date), str(event_e_date),
                         event_s_time.strftime("%H:%M"), event_e_time.strftime("%H:%M"),
@@ -619,9 +622,9 @@ elif menu == "📌 工作行事登記":
                     )
 
                     if synced:
-                        st.success("✅ 工作行事登記成功！已全自動同步至手機 Google 日曆！")
+                        st.success(f"✅ 工作行事登記成功！{sync_msg}")
                     else:
-                        st.success(f"✅ 工作行事登記成功！(日曆同步狀態：{sync_msg})")
+                        st.warning(f"⚠️ 行事登記完成，但日曆自動同步提示：{sync_msg}")
                     st.rerun()
 
         with col_e2:
@@ -680,7 +683,7 @@ elif menu == "📌 工作行事登記":
                         new_w_st.strftime("%H:%M"), new_w_et.strftime("%H:%M"),
                         new_w_desc, new_w_pic
                     )
-                    st.success("工作行事已成功更新並全自動同步手機日曆！")
+                    st.success(f"工作行事已成功更新！{sync_msg}")
                     st.rerun()
             else:
                 st.info("目前尚無有效的工作行事可供修改。")
