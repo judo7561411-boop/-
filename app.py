@@ -337,7 +337,7 @@ menu = st.sidebar.radio(
         "📅 班表、排休與調班",
         "📌 工作行事登記",
         "📱 3C產品借用申請",
-        "🖨️️ 影印輸出登記",
+        "🖨️ 影印輸出登記",
         "📦 物資出入庫管理",
     ],
 )
@@ -523,20 +523,23 @@ if menu == "🗓️ 互動月曆視圖":
         else:
             st.info("目前尚無任何臨時調班紀錄。")
 
-# ==================== 模組 1: 人員名單管理 (全新支援動態新增人員) ====================
+# ==================== 模組 1: 人員名單管理 (全新支援 新增、編輯、刪減) ====================
 elif menu == "👥 人員名單管理":
     st.header("👥 公司在職人員管理")
-    st.info("💡 在此新增的人員，將會全自動連動至全系統所有下拉選單（排班、請假、工作行事負責人、3C借用、影印登記與物資管理）。")
+    st.info("💡 在此進行的人員【新增】、【編輯修改】或【刪減移除】，將會全自動即時連動至全系統所有下拉選單。")
 
-    tab_add_emp, tab_list_emp = st.tabs(["➕ 新增同仁名單", "📋 在職員工總覽"])
+    tab_add_emp, tab_edit_emp, tab_del_emp, tab_list_emp = st.tabs(
+        ["➕ 新增同仁名單", "✏️ 編輯同仁姓名", "🗑️ 刪減同仁名單", "📋 在職員工總覽"]
+    )
 
+    # 1. 新增人員
     with tab_add_emp:
         col_ne1, col_ne2 = st.columns([1, 1])
         with col_ne1:
-            st.subheader("輸入新進同仁姓名")
+            st.subheader("➕ 輸入新進同仁姓名")
             new_emp_name = st.text_input("同仁真實姓名", placeholder="例如：冠宇、志明", key="input_new_emp")
             
-            if st.button("確認新增人員"):
+            if st.button("確認新增人員", key="btn_add_emp"):
                 clean_name = str(new_emp_name).strip()
                 if not clean_name:
                     st.warning("請填寫同仁姓名！")
@@ -564,6 +567,64 @@ elif menu == "👥 人員名單管理":
             st.write("1. 新增後，所有同仁在請假排班、行事曆選擇負責人、登記影印與借用設備時，皆能立即選擇該同仁。")
             st.write("2. 資料會即刻同步至雲端 Google 試算表 `employees` 表單與本地備援資料庫，確保永久留存。")
 
+    # 2. 編輯修改人員姓名
+    with tab_edit_emp:
+        col_ee1, col_ee2 = st.columns([1, 1])
+        with col_ee1:
+            st.subheader("✏️ 編輯修改現有同仁姓名")
+            target_edit_name = st.selectbox("請選擇欲修改的同仁", CURRENT_EMPLOYEES, key="sel_edit_emp")
+            updated_name = st.text_input("請輸入修改後的新姓名", value=target_edit_name, key="input_edit_name")
+
+            if st.button("確認儲存修改", key="btn_edit_emp"):
+                clean_up_name = str(updated_name).strip()
+                if not clean_up_name:
+                    st.warning("同仁姓名不能為空白！")
+                elif clean_up_name == target_edit_name:
+                    st.info("姓名未作任何更動。")
+                elif clean_up_name in CURRENT_EMPLOYEES:
+                    st.error(f"⚠️ 名稱「{clean_up_name}」已存在於其他同仁名單中，請使用其他名稱！")
+                else:
+                    df_emp = load_data("employees", EMPLOYEE_COLS)
+                    # 更新 employees 資料表中的姓名
+                    df_emp.loc[df_emp["name"].astype(str) == target_edit_name, "name"] = clean_up_name
+                    save_data("employees", df_emp)
+
+                    st.success(f"✅ 已成功將「{target_edit_name}」更改為「{clean_up_name}」！全系統選單已同步更新。")
+                    st.rerun()
+
+        with col_ee2:
+            st.subheader("💡 編輯注意事項")
+            st.write("• 修改同仁姓名後，系統內的在職名單將立即更新。")
+            st.write("• 過去已登記的歷史紀錄會保留，若歷史紀錄也需修改可至該模組編輯。")
+
+    # 3. 刪減同仁名單
+    with tab_del_emp:
+        col_de1, col_de2 = st.columns([1, 1])
+        with col_de1:
+            st.subheader("🗑️ 刪減移除離職同仁")
+            target_del_name = st.selectbox("請選擇欲移除的同仁", CURRENT_EMPLOYEES, key="sel_del_emp")
+            confirm_del = st.checkbox(f"我確認要從在職人員名單中移除「{target_del_name}」", key="chk_confirm_del")
+
+            if st.button("確認刪除同仁", key="btn_del_emp"):
+                if not confirm_del:
+                    st.warning("⚠️ 為防止誤刪，請先勾選上方的確認方框！")
+                elif len(CURRENT_EMPLOYEES) <= 1:
+                    st.error("⚠️ 系統至少需保留 1 位在職人員，無法全數刪除！")
+                else:
+                    df_emp = load_data("employees", EMPLOYEE_COLS)
+                    # 篩選移除目標同仁
+                    df_emp = df_emp[df_emp["name"].astype(str) != target_del_name]
+                    save_data("employees", df_emp)
+
+                    st.success(f"🗑️ 已成功自名單中移除同仁「{target_del_name}」！全系統名單已同步更新。")
+                    st.rerun()
+
+        with col_de2:
+            st.subheader("⚠️ 刪減安全說明")
+            st.write("1. 刪減同仁會將其自未來的排班、請假與工作行事負責人選單中除名。")
+            st.write("2. 過去該同仁已留存之排班紀錄、行事曆歷史與影印數據**不會被刪除**，資料依然完整保留供日後備查。")
+
+    # 4. 在職員工總覽
     with tab_list_emp:
         st.subheader("目前在職同仁名單")
         df_emp_disp = load_data("employees", EMPLOYEE_COLS)
@@ -773,7 +834,7 @@ elif menu == "📅 班表、排休與調班":
                     e_dt = f"{edit_ed} 17:00"
                     existing_cal_id = str(curr.get("google_event_id", "")).strip()
 
-                    summary = f"🏖️ [排休-{edit_type}] {edit_emp}"
+                    summary = f"🏖️️ [排休-{edit_type}] {edit_emp}"
                     desc = f"請假同仁：{edit_emp}\n假別：{edit_type}\n時間：{s_dt} 至 {e_dt}\n原因備註：{edit_note}"
                     synced, final_cal_id, _ = sync_event_to_google_calendar(
                         summary, desc, str(edit_sd), str(edit_ed), "08:00", "17:00", existing_cal_id=existing_cal_id
