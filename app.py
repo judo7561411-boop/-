@@ -398,7 +398,7 @@ def get_daily_roster(query_date_str):
 
 # ==================== 模組 0: 互動月曆視圖 ====================
 if menu == "🗓️ 互動月曆視圖":
-    st.header("🗓️️ 整合工作行事、排休與調班月曆")
+    st.header("🗓️ 整合工作行事、排休與調班月曆")
     
     df_schedules = load_data("schedules", SCHEDULE_COLS)
     df_works = load_data("work_events", WORK_EVENT_COLS)
@@ -999,7 +999,7 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 4: 工作行事登記 (整合編輯與刪除於同一頁面) ====================
+# ==================== 模組 4: 工作行事登記 (過期自動隱藏 + 切換自動帶入正確數據) ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (新增/修改/刪除 均即時全自動連動 Google 日曆)")
 
@@ -1017,7 +1017,6 @@ elif menu == "📌 工作行事登記":
         with col_b2:
             st.caption("註：系統會將所有項目自動設定在台灣時間 (UTC+8)，並預設活動前 15 分鐘與 12 小時發出手機提醒。")
 
-    # 簡化為二合一頁籤：新增 與 編輯/刪除
     tab_act_add, tab_act_manage = st.tabs(["➕ 新增工作行事", "✏️ 編輯與刪除既有行事"])
 
     # 1. 新增工作行事
@@ -1081,95 +1080,131 @@ elif menu == "📌 工作行事登記":
             else:
                 st.info("目前尚無任何工作行事紀錄。")
 
-    # 2. 編輯與刪除既有行事 (合一頁面)
+    # 2. 編輯與刪除既有行事 (解決已過期顯示與選取後資料不帶入問題)
     with tab_act_manage:
         st.subheader("✏️ 編輯或刪除工作行事 (操作一站搞定，連動更新/刪除手機日曆)")
-        df_w = load_data("work_events", WORK_EVENT_COLS)
-        if not df_w.empty and len(df_w) > 0:
-            w_options = {
-                f"編號 {r['id']} | [{r['person_in_charge']}] {r['title']} ({r['start_date']} {r['start_time']}~{r['end_time']})": str(r['id'])
-                for _, r in df_w.iterrows() if str(r['title']).strip()
-            }
-            if w_options:
-                w_choice = st.selectbox("請選擇欲處理的工作事項", list(w_options.keys()), key="sel_manage_work")
-                target_w_id = w_options[w_choice]
-                w_curr = df_w[df_w["id"].astype(str) == target_w_id].iloc[0]
+        
+        df_w_all = load_data("work_events", WORK_EVENT_COLS)
+        today_tw = datetime.now(TAIWAN_TZ).date()
+        
+        # 提供是否顯示已過期歷史行事的切換選項
+        show_expired = st.checkbox("🔍 包含已過期的歷史行程 (預設只顯示今天及未來的行事)", value=False, key="chk_show_expired")
 
-                ew_col1, ew_col2 = st.columns(2)
-                with ew_col1:
-                    new_w_title = st.text_input("活動/事項標題", value=str(w_curr["title"]), key="ew_title")
-                    new_w_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, index=EVENT_RESPONSIBLES.index(w_curr["person_in_charge"]) if w_curr["person_in_charge"] in EVENT_RESPONSIBLES else 0, key="ew_pic")
-                    try:
-                        cur_wsd = datetime.strptime(str(w_curr["start_date"]).strip(), "%Y-%m-%d").date()
-                    except Exception:
-                        cur_wsd = date.today()
-                    new_w_sd = st.date_input("開始日期", value=cur_wsd, key="ew_sd")
+        if not df_w_all.empty and len(df_w_all) > 0:
+            # 依條件過濾已過期行程
+            if not show_expired:
+                # 結束日期大於等於今天的有效行程
+                df_w_valid = df_w_all[df_w_all["end_date"].astype(str) >= str(today_tw)]
+            else:
+                df_w_valid = df_w_all
+
+            if not df_w_valid.empty and len(df_w_valid) > 0:
+                # 組裝清晰易讀的選單標籤
+                w_options = {}
+                for _, r in df_w_valid.iterrows():
+                    r_title = str(r.get("title", "")).strip()
+                    if not r_title:
+                        continue
+                    r_id = str(r["id"])
+                    r_pic = str(r.get("person_in_charge", "全體"))
+                    r_sd = str(r.get("start_date", ""))
+                    r_ed = str(r.get("end_date", ""))
+                    r_st = parse_and_normalize_time(r.get("start_time"), "09:00")
+                    r_et = parse_and_normalize_time(r.get("end_time"), "10:00")
                     
+                    date_range_str = f"{r_sd} {r_st}~{r_et}" if r_sd == r_ed else f"{r_sd}~{r_ed} {r_st}~{r_et}"
+                    label = f"編號 {r_id} | [{r_pic}] {r_title} ({date_range_str})"
+                    w_options[label] = r_id
+
+                if w_options:
+                    w_choice = st.selectbox("請選擇欲處理的工作事項", list(w_options.keys()), key="sel_manage_work")
+                    target_w_id = w_options[w_choice]
+                    w_curr = df_w_all[df_w_all["id"].astype(str) == target_w_id].iloc[0]
+
+                    # 解析當前選定項目的真實數據
+                    cur_title_val = str(w_curr.get("title", ""))
+                    cur_pic_val = str(w_curr.get("person_in_charge", "全體"))
+                    try:
+                        cur_wsd_val = datetime.strptime(str(w_curr.get("start_date", "")).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_wsd_val = today_tw
+                    try:
+                        cur_wed_val = datetime.strptime(str(w_curr.get("end_date", "")).strip(), "%Y-%m-%d").date()
+                    except Exception:
+                        cur_wed_val = cur_wsd_val
                     try:
                         cur_wst_str = parse_and_normalize_time(w_curr.get("start_time"), "09:00")
-                        cur_wst = datetime.strptime(cur_wst_str, "%H:%M").time()
+                        cur_wst_val = datetime.strptime(cur_wst_str, "%H:%M").time()
                     except Exception:
-                        cur_wst = time(9, 0)
-                    new_w_st = st.time_input("開始時間", value=cur_wst, key="ew_st")
-                with ew_col2:
-                    try:
-                        cur_wed = datetime.strptime(str(w_curr["end_date"]).strip(), "%Y-%m-%d").date()
-                    except Exception:
-                        cur_wed = new_w_sd
-                    new_w_ed = st.date_input("結束日期", value=cur_wed, min_value=new_w_sd, key="ew_ed")
+                        cur_wst_val = time(9, 0)
                     try:
                         cur_wet_str = parse_and_normalize_time(w_curr.get("end_time"), "10:00")
-                        cur_wet = datetime.strptime(cur_wet_str, "%H:%M").time()
+                        cur_wet_val = datetime.strptime(cur_wet_str, "%H:%M").time()
                     except Exception:
-                        cur_wet = time(10, 0)
-                    new_w_et = st.time_input("結束時間", value=cur_wet, key="ew_et")
-                    new_w_desc = st.text_area("內容說明", value=str(w_curr["description"]), key="ew_desc")
+                        cur_wet_val = time(10, 0)
+                    cur_desc_val = str(w_curr.get("description", ""))
 
-                st.divider()
-                # 儲存修改與刪除行程並列於同一個操作區
-                col_btn_save, col_btn_del = st.columns([1, 1])
+                    # 關鍵修復：將每個元件的 key 加上 target_w_id，確保切換選項時數據 100% 精準自動載入
+                    ew_col1, ew_col2 = st.columns(2)
+                    with ew_col1:
+                        new_w_title = st.text_input("活動/事項標題", value=cur_title_val, key=f"ew_title_{target_w_id}")
+                        pic_idx = EVENT_RESPONSIBLES.index(cur_pic_val) if cur_pic_val in EVENT_RESPONSIBLES else 0
+                        new_w_pic = st.selectbox("負責人", EVENT_RESPONSIBLES, index=pic_idx, key=f"ew_pic_{target_w_id}")
+                        new_w_sd = st.date_input("開始日期", value=cur_wsd_val, key=f"ew_sd_{target_w_id}")
+                        new_w_st = st.time_input("開始時間", value=cur_wst_val, key=f"ew_st_{target_w_id}")
+                    with ew_col2:
+                        min_ed = new_w_sd
+                        valid_wed = cur_wed_val if cur_wed_val >= min_ed else min_ed
+                        new_w_ed = st.date_input("結束日期", value=valid_wed, min_value=min_ed, key=f"ew_ed_{target_w_id}")
+                        new_w_et = st.time_input("結束時間", value=cur_wet_val, key=f"ew_et_{target_w_id}")
+                        new_w_desc = st.text_area("內容說明", value=cur_desc_val, key=f"ew_desc_{target_w_id}")
 
-                with col_btn_save:
-                    if st.button("💾 儲存修改 (連動更新日曆)", key="btn_save_edit_work"):
-                        existing_cal_id = str(w_curr.get("google_event_id", "")).strip()
-                        s_t_norm = new_w_st.strftime("%H:%M")
-                        e_t_norm = new_w_et.strftime("%H:%M")
+                    st.divider()
+                    col_btn_save, col_btn_del = st.columns([1, 1])
 
-                        summary = f"💼 [{new_w_pic}] {new_w_title.strip()}"
-                        desc = f"負責人：{new_w_pic}\n內容說明：{new_w_desc.strip()}"
-                        synced, final_cal_id, sync_msg = sync_event_to_google_calendar(
-                            summary, desc, str(new_w_sd), str(new_w_ed),
-                            s_t_norm, e_t_norm,
-                            existing_cal_id=existing_cal_id
-                        )
+                    with col_btn_save:
+                        if st.button("💾 儲存修改 (連動更新日曆)", key=f"btn_save_{target_w_id}"):
+                            existing_cal_id = str(w_curr.get("google_event_id", "")).strip()
+                            s_t_norm = new_w_st.strftime("%H:%M")
+                            e_t_norm = new_w_et.strftime("%H:%M")
 
-                        df_w.loc[df_w["id"].astype(str) == target_w_id, ["title", "person_in_charge", "start_date", "end_date", "start_time", "end_time", "description", "google_event_id"]] = [
-                            str(new_w_title).strip(), str(new_w_pic), str(new_w_sd), str(new_w_ed), s_t_norm, e_t_norm, str(new_w_desc).strip(), str(final_cal_id)
-                        ]
-                        save_data("work_events", df_w)
+                            summary = f"💼 [{new_w_pic}] {new_w_title.strip()}"
+                            desc = f"負責人：{new_w_pic}\n內容說明：{new_w_desc.strip()}"
+                            synced, final_cal_id, sync_msg = sync_event_to_google_calendar(
+                                summary, desc, str(new_w_sd), str(new_w_ed),
+                                s_t_norm, e_t_norm,
+                                existing_cal_id=existing_cal_id
+                            )
 
-                        if synced:
-                            st.success(f"✅ 工作行事已成功儲存！時間：{s_t_norm}~{e_t_norm}，且手機 Google 日曆已連動更新！")
-                        else:
-                            st.warning(f"⚠️ 資料已儲存，但日曆連動修改提示：{sync_msg}")
-                        st.rerun()
+                            df_w_all.loc[df_w_all["id"].astype(str) == target_w_id, ["title", "person_in_charge", "start_date", "end_date", "start_time", "end_time", "description", "google_event_id"]] = [
+                                str(new_w_title).strip(), str(new_w_pic), str(new_w_sd), str(new_w_ed), s_t_norm, e_t_norm, str(new_w_desc).strip(), str(final_cal_id)
+                            ]
+                            save_data("work_events", df_w_all)
 
-                with col_btn_del:
-                    confirm_del = st.checkbox("確認刪除此事項", key="chk_del_same_page")
-                    if st.button("🗑️ 刪除此行程 (連動移除日曆)", key="btn_del_same_page"):
-                        if not confirm_del:
-                            st.warning("⚠️ 請先勾選「確認刪除此事項」以防止誤按！")
-                        else:
-                            cal_id = str(w_curr.get("google_event_id", "")).strip()
-                            cal_deleted, cal_msg = delete_google_calendar_event(cal_id)
-
-                            df_w = df_w[df_w["id"].astype(str) != target_w_id]
-                            save_data("work_events", df_w)
-
-                            st.success(f"🗑️ 工作行事已成功刪除！{cal_msg}")
+                            if synced:
+                                st.success(f"✅ 工作行事已成功儲存！時間：{s_t_norm}~{e_t_norm}，且手機 Google 日曆已連動更新！")
+                            else:
+                                st.warning(f"⚠️ 資料已儲存，但日曆連動修改提示：{sync_msg}")
                             st.rerun()
+
+                    with col_btn_del:
+                        confirm_del = st.checkbox("確認刪除此事項", key=f"chk_del_{target_w_id}")
+                        if st.button("🗑️ 刪除此行程 (連動移除日曆)", key=f"btn_del_{target_w_id}"):
+                            if not confirm_del:
+                                st.warning("⚠️ 請先勾選「確認刪除此事項」以防止誤按！")
+                            else:
+                                cal_id = str(w_curr.get("google_event_id", "")).strip()
+                                cal_deleted, cal_msg = delete_google_calendar_event(cal_id)
+
+                                df_w_all = df_w_all[df_w_all["id"].astype(str) != target_w_id]
+                                save_data("work_events", df_w_all)
+
+                                st.success(f"🗑️ 工作行事已成功刪除！{cal_msg}")
+                                st.rerun()
+                else:
+                    st.info("目前沒有符合條件的工作行事可供編輯。")
             else:
-                st.info("目前尚無有效的工作行事可供編輯或刪除。")
+                st.info("目前沒有尚未過期之工作行事。若欲查看已結束之行程，請勾選上方的「包含已過期的歷史行程」。")
         else:
             st.info("目前尚無任何工作行事紀錄。")
 
