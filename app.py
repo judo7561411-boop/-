@@ -19,9 +19,8 @@ except ModuleNotFoundError:
     build = None
     HAS_CALENDAR_LIB = False
 
-# 預設固定名單與參數
-EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
-EVENT_RESPONSIBLES = ["全體", "伊臻", "美釵", "涵玟", "勝順"]
+# 系統預設固定名單與參數
+DEFAULT_EMPLOYEES = ["伊臻", "美釵", "涵玟", "勝順"]
 DEVICES = ["平板-1", "平板-2", "平板-3", "投影機"]
 DEFAULT_SUPPLIES = [
     "酒精", "漂白水", "衛生紙", "擦手紙", "洗手乳",
@@ -39,6 +38,7 @@ SCOPES = [
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 # 資料表欄位標準定義
+EMPLOYEE_COLS = ["id", "name", "created_at"]
 WORK_EVENT_COLS = ["id", "start_date", "end_date", "start_time", "end_time", "title", "person_in_charge", "description", "google_event_id"]
 SCHEDULE_COLS = ["id", "employee_name", "leave_type", "start_datetime", "end_datetime", "start_date", "end_date", "note", "google_event_id"]
 SWAP_COLS = ["id", "swap_date", "employee_name", "assigned_shift", "reason", "google_event_id"]
@@ -115,7 +115,6 @@ def get_gspread_client():
         return None
 
 def normalize_time_str(t_str, default="09:00"):
-    """將 9:00 或其他非標準格式時間自動補零為 09:00"""
     t_clean = str(t_str).strip()
     if not t_clean:
         return default
@@ -128,6 +127,73 @@ def normalize_time_str(t_str, default="09:00"):
         except Exception:
             return default
     return default
+
+def get_worksheet(sheet_name: str, default_cols: list):
+    sh = get_gspread_client()
+    if not sh:
+        return None
+    try:
+        return sh.worksheet(sheet_name)
+    except Exception:
+        try:
+            ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
+            ws.append_row(default_cols)
+            return ws
+        except Exception:
+            return None
+
+def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
+    ws = get_worksheet(sheet_name, default_cols)
+    if ws:
+        try:
+            records = ws.get_all_records()
+            if records:
+                df = pd.DataFrame(records)
+                for col in default_cols:
+                    if col not in df.columns:
+                        df[col] = ""
+                df = df.fillna("").astype(str)
+                save_local_fallback(sheet_name, df)
+                return df
+            else:
+                df = pd.DataFrame(columns=default_cols)
+                save_local_fallback(sheet_name, df)
+                return df
+        except Exception:
+            pass
+    return load_local_fallback(sheet_name, default_cols)
+
+def save_data(sheet_name: str, df: pd.DataFrame):
+    save_local_fallback(sheet_name, df)
+    ws = get_worksheet(sheet_name, df.columns.tolist())
+    if ws:
+        try:
+            ws.clear()
+            header = df.columns.tolist()
+            values = df.fillna("").astype(str).values.tolist()
+            ws.update(range_name="A1", values=[header] + values)
+        except Exception as e:
+            st.error(f"雲端試算表同步暫時延遲，本地已安全備份：{e}")
+
+# ==================== 動態人員管理工具函式 ====================
+def get_current_employees():
+    """動態載入人員名單；若初次使用則自動初始化預設同仁"""
+    df_emp = load_data("employees", EMPLOYEE_COLS)
+    if df_emp.empty or len(df_emp) == 0:
+        now_time = datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        init_rows = [{"id": str(i + 1), "name": name, "created_at": now_time} for i, name in enumerate(DEFAULT_EMPLOYEES)]
+        df_emp = pd.DataFrame(init_rows)
+        save_data("employees", df_emp)
+        return DEFAULT_EMPLOYEES
+    
+    names = [str(x).strip() for x in df_emp["name"].tolist() if str(x).strip()]
+    if not names:
+        return DEFAULT_EMPLOYEES
+    return names
+
+# 動態取得當前最新人員名單
+CURRENT_EMPLOYEES = get_current_employees()
+EVENT_RESPONSIBLES = ["全體"] + CURRENT_EMPLOYEES
 
 # ==================== Google 日曆通用寫入/更新核心函式 ====================
 def sync_event_to_google_calendar(summary, description, s_date, e_date, s_time, e_time, existing_cal_id=""):
@@ -245,53 +311,6 @@ def batch_sync_all_to_google_calendar():
 
     return success_cnt, fail_cnt, "全面同步完成"
 
-def get_worksheet(sheet_name: str, default_cols: list):
-    sh = get_gspread_client()
-    if not sh:
-        return None
-    try:
-        return sh.worksheet(sheet_name)
-    except Exception:
-        try:
-            ws = sh.add_worksheet(title=sheet_name, rows=100, cols=20)
-            ws.append_row(default_cols)
-            return ws
-        except Exception:
-            return None
-
-def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
-    ws = get_worksheet(sheet_name, default_cols)
-    if ws:
-        try:
-            records = ws.get_all_records()
-            if records:
-                df = pd.DataFrame(records)
-                for col in default_cols:
-                    if col not in df.columns:
-                        df[col] = ""
-                df = df.fillna("").astype(str)
-                save_local_fallback(sheet_name, df)
-                return df
-            else:
-                df = pd.DataFrame(columns=default_cols)
-                save_local_fallback(sheet_name, df)
-                return df
-        except Exception:
-            pass
-    return load_local_fallback(sheet_name, default_cols)
-
-def save_data(sheet_name: str, df: pd.DataFrame):
-    save_local_fallback(sheet_name, df)
-    ws = get_worksheet(sheet_name, df.columns.tolist())
-    if ws:
-        try:
-            ws.clear()
-            header = df.columns.tolist()
-            values = df.fillna("").astype(str).values.tolist()
-            ws.update(range_name="A1", values=[header] + values)
-        except Exception as e:
-            st.error(f"雲端試算表同步暫時延遲，本地已安全備份：{e}")
-
 # 頁面配置
 st.set_page_config(page_title="內部行政管理系統", layout="wide")
 st.title("🏢 公司內部行政管理系統")
@@ -313,11 +332,12 @@ menu = st.sidebar.radio(
     "系統模組切換",
     [
         "🗓️ 互動月曆視圖",
+        "👥 人員名單管理",
         "📤 匯出每月綜合報表",
         "📅 班表、排休與調班",
         "📌 工作行事登記",
         "📱 3C產品借用申請",
-        "🖨️ 影印輸出登記",
+        "🖨️️ 影印輸出登記",
         "📦 物資出入庫管理",
     ],
 )
@@ -325,10 +345,14 @@ menu = st.sidebar.radio(
 def get_daily_roster(query_date_str):
     q_date = datetime.strptime(query_date_str, "%Y-%m-%d")
     month = q_date.month
-    if month % 2 != 0:
-        roster = {"伊臻": "A班", "涵玟": "A班", "美釵": "B班", "勝順": "未排班"}
-    else:
-        roster = {"美釵": "A班", "伊臻": "B班", "涵玟": "B班", "勝順": "未排班"}
+    roster = {}
+    for emp in CURRENT_EMPLOYEES:
+        if emp == "勝順":
+            roster[emp] = "未排班"
+        elif month % 2 != 0:
+            roster[emp] = "A班" if emp in ["伊臻", "涵玟"] else "B班"
+        else:
+            roster[emp] = "A班" if emp == "美釵" else "B班"
 
     df_swaps = load_data("shift_swaps", SWAP_COLS)
     if not df_swaps.empty:
@@ -337,11 +361,10 @@ def get_daily_roster(query_date_str):
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 (強化容錯與資料渲染) ====================
+# ==================== 模組 0: 互動月曆視圖 ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事、排休與調班月曆")
     
-    # 頂部提供手動重整按鈕與資料筆數檢查
     df_schedules = load_data("schedules", SCHEDULE_COLS)
     df_works = load_data("work_events", WORK_EVENT_COLS)
     df_swaps = load_data("shift_swaps", SWAP_COLS)
@@ -353,12 +376,11 @@ if menu == "🗓️ 互動月曆視圖":
         if st.button("🔄 重新整理月曆資料"):
             st.rerun()
 
-    # 即時資料量指標，協助確認資料是否成功載入
     st.caption(f"📊 目前資料庫中載入項目統計：💼 工作行事 {len(df_works)} 筆 ｜ 🏖️ 同仁排休 {len(df_schedules)} 筆 ｜ 🔄 臨時調班 {len(df_swaps)} 筆")
 
     calendar_events = []
 
-    # 1. 組裝排休事件（全天事件，end 自動加 1 天防止最後一天被吞掉）
+    # 1. 排休事件
     for _, row in df_schedules.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         s_date_raw = str(row.get("start_date", "")).strip()
@@ -390,7 +412,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 2. 組裝調班事件
+    # 2. 調班事件
     for _, row in df_swaps.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         sw_d = str(row.get("swap_date", "")).strip()
@@ -421,7 +443,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 3. 組裝工作行事事件（正規化時間格式，防止前端無法渲染）
+    # 3. 工作行事事件
     for _, row in df_works.iterrows():
         title = str(row.get("title", "")).strip()
         s_d = str(row.get("start_date", "")).strip()
@@ -501,7 +523,53 @@ if menu == "🗓️ 互動月曆視圖":
         else:
             st.info("目前尚無任何臨時調班紀錄。")
 
-# ==================== 模組 1: 匯出每月綜合報表 ====================
+# ==================== 模組 1: 人員名單管理 (全新支援動態新增人員) ====================
+elif menu == "👥 人員名單管理":
+    st.header("👥 公司在職人員管理")
+    st.info("💡 在此新增的人員，將會全自動連動至全系統所有下拉選單（排班、請假、工作行事負責人、3C借用、影印登記與物資管理）。")
+
+    tab_add_emp, tab_list_emp = st.tabs(["➕ 新增同仁名單", "📋 在職員工總覽"])
+
+    with tab_add_emp:
+        col_ne1, col_ne2 = st.columns([1, 1])
+        with col_ne1:
+            st.subheader("輸入新進同仁姓名")
+            new_emp_name = st.text_input("同仁真實姓名", placeholder="例如：冠宇、志明", key="input_new_emp")
+            
+            if st.button("確認新增人員"):
+                clean_name = str(new_emp_name).strip()
+                if not clean_name:
+                    st.warning("請填寫同仁姓名！")
+                elif clean_name in CURRENT_EMPLOYEES:
+                    st.error(f"⚠️ 同仁「{clean_name}」已經存在於系統名單中，請勿重複新增。")
+                else:
+                    df_emp = load_data("employees", EMPLOYEE_COLS)
+                    valid_ids = pd.to_numeric(df_emp["id"], errors="coerce").dropna()
+                    new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
+                    now_str = datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+                    new_row = pd.DataFrame([{
+                        "id": str(new_id),
+                        "name": clean_name,
+                        "created_at": now_str
+                    }])
+                    df_emp = pd.concat([df_emp, new_row], ignore_index=True)
+                    save_data("employees", df_emp)
+
+                    st.success(f"🎉 成功新增同仁「{clean_name}」！系統選單已即時同步更新。")
+                    st.rerun()
+
+        with col_ne2:
+            st.subheader("💡 使用提示")
+            st.write("1. 新增後，所有同仁在請假排班、行事曆選擇負責人、登記影印與借用設備時，皆能立即選擇該同仁。")
+            st.write("2. 資料會即刻同步至雲端 Google 試算表 `employees` 表單與本地備援資料庫，確保永久留存。")
+
+    with tab_list_emp:
+        st.subheader("目前在職同仁名單")
+        df_emp_disp = load_data("employees", EMPLOYEE_COLS)
+        st.dataframe(df_emp_disp.rename(columns={"id": "系統編號", "name": "同仁姓名", "created_at": "建立時間"}), width="stretch")
+
+# ==================== 模組 2: 匯出每月綜合報表 ====================
 elif menu == "📤 匯出每月綜合報表":
     st.header("📤 每月工作行程、排班及影印報表輸出")
     col_y, col_m = st.columns(2)
@@ -524,7 +592,7 @@ elif menu == "📤 匯出每月綜合報表":
         daily_shifts = get_daily_roster(cur_d_str)
 
         row = {"日期": cur_d_str, "星期": w_day}
-        for emp in EMPLOYEES:
+        for emp in CURRENT_EMPLOYEES:
             shift_info = daily_shifts.get(emp, "未排班")
             if not df_schedules.empty:
                 emp_leaves = df_schedules[
@@ -606,7 +674,7 @@ elif menu == "📤 匯出每月綜合報表":
             mime="text/csv",
         )
 
-# ==================== 模組 2: 班表、排休與調班 ====================
+# ==================== 模組 3: 班表、排休與調班 ====================
 elif menu == "📅 班表、排休與調班":
     st.header("📅 班表排班、排休與調班 (支援即時自動連動 Google 日曆與提醒)")
 
@@ -618,7 +686,7 @@ elif menu == "📅 班表、排休與調班":
         st.subheader("新增排休 (每日限制最多 1 人，登記自動寫入手機日曆)")
         col_l1, col_l2 = st.columns(2)
         with col_l1:
-            emp = st.selectbox("請假同仁", EMPLOYEES, key="leave_emp")
+            emp = st.selectbox("請假同仁", CURRENT_EMPLOYEES, key="leave_emp")
             l_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], key="leave_type")
             s_date = st.date_input("開始休假日期", min_value=date.today())
             s_time = st.time_input("開始休假時間", value=time(8, 0))
@@ -685,7 +753,7 @@ elif menu == "📅 班表、排休與調班":
 
                 c_e1, c_e2 = st.columns(2)
                 with c_e1:
-                    edit_emp = st.selectbox("請假同仁", EMPLOYEES, index=EMPLOYEES.index(curr["employee_name"]) if curr["employee_name"] in EMPLOYEES else 0, key="ed_l_emp")
+                    edit_emp = st.selectbox("請假同仁", CURRENT_EMPLOYEES, index=CURRENT_EMPLOYEES.index(curr["employee_name"]) if curr["employee_name"] in CURRENT_EMPLOYEES else 0, key="ed_l_emp")
                     edit_type = st.selectbox("假別", ["特休", "補休", "公假", "公出", "事假", "病假"], index=["特休", "補休", "公假", "公出", "事假", "病假"].index(curr["leave_type"]) if curr["leave_type"] in ["特休", "補休", "公假", "公出", "事假", "病假"] else 0, key="ed_l_type")
                     try:
                         cur_sd = datetime.strptime(str(curr["start_date"]).strip(), "%Y-%m-%d").date()
@@ -727,7 +795,7 @@ elif menu == "📅 班表、排休與調班":
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             swap_d = st.date_input("調班日期", key="swap_date")
-            swap_emp = st.selectbox("調班同仁", EMPLOYEES, key="swap_emp")
+            swap_emp = st.selectbox("調班同仁", CURRENT_EMPLOYEES, key="swap_emp")
         with col_s2:
             new_shift = st.selectbox("變更為班別", ["A班 (08:00-16:30)", "B班 (08:30-17:00)", "休假/不排班"])
             swap_reason = st.text_input("調班事由")
@@ -788,7 +856,7 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 3: 工作行事登記 (強化輸入驗證與即時呈現) ====================
+# ==================== 模組 4: 工作行事登記 ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (新增/修改均即時全自動同步 Google 日曆)")
 
@@ -834,7 +902,6 @@ elif menu == "📌 工作行事登記":
                     s_t_str = event_s_time.strftime("%H:%M")
                     e_t_str = event_e_time.strftime("%H:%M")
 
-                    # 1. Google 日曆同步
                     summary = f"💼 [{event_pic}] {event_title.strip()}"
                     desc = f"負責人：{event_pic}\n內容說明：{event_desc.strip()}"
                     synced, cal_id, sync_msg = sync_event_to_google_calendar(
@@ -842,7 +909,6 @@ elif menu == "📌 工作行事登記":
                         s_t_str, e_t_str
                     )
 
-                    # 2. 存入資料庫
                     df_w = load_data("work_events", WORK_EVENT_COLS)
                     valid_ids = pd.to_numeric(df_w["id"], errors="coerce").dropna()
                     new_id = int(valid_ids.max() + 1) if not valid_ids.empty else 1
@@ -940,7 +1006,7 @@ elif menu == "📌 工作行事登記":
         else:
             st.info("目前尚無工作行事可供修改。")
 
-# ==================== 模組 4: 3C產品借用申請 ====================
+# ==================== 模組 5: 3C產品借用申請 ====================
 elif menu == "📱 3C產品借用申請":
     st.header("📱 3C產品借用申請與狀況登記")
     tab_dev_add, tab_dev_edit = st.tabs(["➕ 登記借用", "✏️ 修改借用紀錄"])
@@ -949,7 +1015,7 @@ elif menu == "📱 3C產品借用申請":
         col_b1, col_b2 = st.columns([1, 2])
         with col_b1:
             borrow_item = st.selectbox("借用申請物品", DEVICES, key="borrow_item")
-            borrow_applicant = st.selectbox("申請人", EMPLOYEES, key="borrow_app")
+            borrow_applicant = st.selectbox("申請人", CURRENT_EMPLOYEES, key="borrow_app")
             borrow_date = st.date_input("借用日期", value=date.today(), key="borrow_d")
             col_bt1, col_bt2 = st.columns(2)
             with col_bt1:
@@ -999,7 +1065,7 @@ elif menu == "📱 3C產品借用申請":
                 eb_col1, eb_col2 = st.columns(2)
                 with eb_col1:
                     ed_item = st.selectbox("借用物品", DEVICES, index=DEVICES.index(b_curr["device_name"]) if b_curr["device_name"] in DEVICES else 0, key="ed_b_item")
-                    ed_app = st.selectbox("申請同仁", EMPLOYEES, index=EMPLOYEES.index(b_curr["applicant"]) if b_curr["applicant"] in EMPLOYEES else 0, key="ed_b_app")
+                    ed_app = st.selectbox("申請同仁", CURRENT_EMPLOYEES, index=CURRENT_EMPLOYEES.index(b_curr["applicant"]) if b_curr["applicant"] in CURRENT_EMPLOYEES else 0, key="ed_b_app")
                     try:
                         cur_bd = datetime.strptime(str(b_curr["borrow_date"]).strip(), "%Y-%m-%d").date()
                     except Exception:
@@ -1031,7 +1097,7 @@ elif menu == "📱 3C產品借用申請":
         else:
             st.info("目前尚無 3C 借用紀錄可供修改。")
 
-# ==================== 模組 5: 影印輸出登記 ====================
+# ==================== 模組 6: 影印輸出登記 ====================
 elif menu == "🖨️ 影印輸出登記":
     st.header("🖨️ 影印輸出登記與每月報表")
     tab_p_reg, tab_p_month = st.tabs(["📝 影印登記", "📊 每月影印統計與輸出"])
@@ -1040,7 +1106,7 @@ elif menu == "🖨️ 影印輸出登記":
         with st.form("print_form"):
             col_p1, col_p2 = st.columns(2)
             with col_p1:
-                p_user = st.selectbox("登記人姓名", EMPLOYEES)
+                p_user = st.selectbox("登記人姓名", CURRENT_EMPLOYEES)
                 p_date = st.date_input("影印日期", value=date.today())
                 p_pages = st.number_input("輸出張數", min_value=1, value=1, step=1)
             with col_p2:
@@ -1131,7 +1197,7 @@ elif menu == "🖨️ 影印輸出登記":
         else:
             st.info(f"{p_year} 年 {p_month} 月 目前尚無任何影印登記紀錄。")
 
-# ==================== 模組 6: 物資出入庫管理 ====================
+# ==================== 模組 7: 物資出入庫管理 ====================
 elif menu == "📦 物資出入庫管理":
     st.header("📦 物資申請出庫與採購入庫")
     df_supplies = load_data("supplies", ["item_name", "stock"])
@@ -1142,7 +1208,7 @@ elif menu == "📦 物資出入庫管理":
     with tab_out:
         col_o1, col_o2 = st.columns(2)
         with col_o1:
-            applicant = st.selectbox("領用人", EMPLOYEES, key="mat_out_user")
+            applicant = st.selectbox("領用人", CURRENT_EMPLOYEES, key="mat_out_user")
             out_item = st.selectbox("物資品項", items if items else DEFAULT_SUPPLIES, key="mat_out_item")
         with col_o2:
             out_qty = st.number_input("領用數量", min_value=1, value=1, step=1, key="mat_out_q")
@@ -1168,7 +1234,7 @@ elif menu == "📦 物資出入庫管理":
     with tab_in:
         col_i1, col_i2 = st.columns(2)
         with col_i1:
-            buyer = st.selectbox("入庫人", EMPLOYEES, key="mat_in_user")
+            buyer = st.selectbox("入庫人", CURRENT_EMPLOYEES, key="mat_in_user")
             in_item = st.selectbox("入庫品項", items if items else DEFAULT_SUPPLIES, key="mat_in_item")
         with col_i2:
             in_qty = st.number_input("採購進貨數量", min_value=1, value=1, step=1, key="mat_in_q")
