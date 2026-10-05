@@ -264,7 +264,6 @@ def sync_event_to_google_calendar(summary, description, s_date, e_date, s_time, 
 
 # Google 日曆連動刪除函式
 def delete_google_calendar_event(cal_event_id):
-    """自 Google 日曆中連動刪除指定行程"""
     if not HAS_CALENDAR_LIB or not str(cal_event_id).strip():
         return False, "無日曆事件 ID 或缺少套件"
 
@@ -281,7 +280,6 @@ def delete_google_calendar_event(cal_event_id):
         service.events().delete(calendarId=calendar_id, eventId=str(cal_event_id).strip()).execute()
         return True, "手機 Google 日曆行程已同步刪除！"
     except Exception as e:
-        # 404 或 410 代表活動本來就已被刪除
         if "404" in str(e) or "410" in str(e):
             return True, "日曆活動原已不存在，已同步清除。"
         return False, f"日曆刪除失敗：{e}"
@@ -398,7 +396,7 @@ def get_daily_roster(query_date_str):
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 ====================
+# ==================== 模組 0: 互動月曆視圖 (清晰顯示每日行事標題與時段) ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事、排休與調班月曆")
     
@@ -408,7 +406,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     c_m_top1, c_m_top2 = st.columns([4, 1])
     with c_m_top1:
-        st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】，紫色代表【臨時調班】。點擊月曆方塊可在下方查看詳細內容。")
+        st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】，紫色代表【臨時調班】。月曆格子內已清楚標示「時段」與「標題」。")
     with c_m_top2:
         if st.button("🔄 重新整理月曆資料"):
             st.rerun()
@@ -417,7 +415,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     calendar_events = []
 
-    # 1. 排休事件
+    # 1. 組裝排休事件 (全天事件)
     for _, row in df_schedules.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         s_date_raw = str(row.get("start_date", "")).strip()
@@ -449,7 +447,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 2. 調班事件
+    # 2. 組裝調班事件 (全天事件)
     for _, row in df_swaps.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         sw_d = str(row.get("swap_date", "")).strip()
@@ -480,7 +478,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 3. 工作行事事件
+    # 3. 組裝工作行事事件 (精準標題與時段)
     for _, row in df_works.iterrows():
         title = str(row.get("title", "")).strip()
         s_d = str(row.get("start_date", "")).strip()
@@ -492,8 +490,11 @@ if menu == "🗓️ 互動月曆視圖":
         real_end_time = parse_and_normalize_time(row.get("end_time"), default="10:00")
         pic = str(row.get("person_in_charge", "全體")).strip()
 
+        # 在標題中清楚融入時段區間與負責人，月曆方塊一眼看懂
+        event_display_title = f"{real_start_time}-{real_end_time} [{pic}] {title}"
+
         calendar_events.append({
-            "title": f"💼 {real_start_time} [{pic}] {title}",
+            "title": event_display_title,
             "start": f"{s_d}T{real_start_time}:00",
             "end": f"{e_d}T{real_end_time}:00",
             "allDay": False,
@@ -510,6 +511,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
+    # 月曆配置：強化月檢視 (dayGridMonth) 的標題與時段顯示
     calendar_options = {
         "headerToolbar": {
             "left": "today prev,next",
@@ -521,17 +523,45 @@ if menu == "🗓️ 互動月曆視圖":
         "selectable": True,
         "editable": False,
         "locale": "zh-tw",
+        "displayEventTime": True,
+        "displayEventEnd": True,
         "eventTimeFormat": {
             "hour": "2-digit",
             "minute": "2-digit",
             "hour12": False,
+            "meridiem": False
         },
     }
+
+    # 自訂 CSS 樣式：取消強制單行截斷、調大字體並讓標題與時間美觀換行
+    custom_css = """
+        .fc-event {
+            padding: 2px 4px !important;
+            border-radius: 4px !important;
+            margin-bottom: 2px !important;
+            cursor: pointer !important;
+        }
+        .fc-event-title {
+            font-size: 0.85rem !important;
+            font-weight: 500 !important;
+            white-space: normal !important;
+            word-break: break-word !important;
+            line-height: 1.25 !important;
+        }
+        .fc-event-time {
+            font-size: 0.78rem !important;
+            font-weight: bold !important;
+            margin-right: 4px !important;
+        }
+        .fc-daygrid-day-frame {
+            min-height: 110px !important;
+        }
+    """
 
     cal_out = calendar(
         events=calendar_events,
         options=calendar_options,
-        custom_css=".fc-event-title { font-weight: 500; font-size: 0.85rem; }",
+        custom_css=custom_css,
         key="main_calendar_view",
     )
 
@@ -654,7 +684,7 @@ elif menu == "👥 人員名單管理":
                     df_emp = df_emp[df_emp["name"].astype(str) != target_del_name]
                     save_data("employees", df_emp)
 
-                    st.success(f"🗑️️ 已成功自名單中移除同仁「{target_del_name}」！全系統名單已同步更新。")
+                    st.success(f"🗑️ 已成功自名單中移除同仁「{target_del_name}」！全系統名單已同步更新。")
                     st.rerun()
 
         with col_de2:
@@ -950,11 +980,11 @@ elif menu == "📅 班表、排休與調班":
             a_members = [k for k, v in daily_shifts.items() if "A班" in v]
             st.write("、".join(a_members) if a_members else "無")
         with col_b:
-            st.markdown("#### 🅱️ B班 (08:30 - 17:00)")
+            st.markdown("#### 🅱️️ B班 (08:30 - 17:00)")
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 4: 工作行事登記 (支援 新增 / 編輯 / 刪除 及連動日曆) ====================
+# ==================== 模組 4: 工作行事登記 ====================
 elif menu == "📌 工作行事登記":
     st.header("📌 工作行事管理 (新增/修改/刪除 均即時全自動連動 Google 日曆)")
 
@@ -1107,7 +1137,7 @@ elif menu == "📌 工作行事登記":
         else:
             st.info("目前尚無工作行事可供修改。")
 
-    # 3. 刪除工作行事 (全新功能：連動刪除 Google 日曆事件)
+    # 3. 刪除工作行事
     with tab_act_del:
         st.subheader("🗑️ 刪除工作行事 (手機 Google 日曆將同步刪除)")
         df_w = load_data("work_events", WORK_EVENT_COLS)
@@ -1121,19 +1151,16 @@ elif menu == "📌 工作行事登記":
                 target_del_id = del_options[del_choice]
                 del_curr = df_w[df_w["id"].astype(str) == target_del_id].iloc[0]
 
-                # 顯示預覽卡片
                 st.warning(f"⚠️ 即將刪除：**[{del_curr['person_in_charge']}] {del_curr['title']}**\n\n日期時段：`{del_curr['start_date']} {del_curr['start_time']} ~ {del_curr['end_time']}`\n\n內容說明：{del_curr['description'] if str(del_curr['description']).strip() else '無'}")
                 confirm_del_work = st.checkbox("我確認要永久刪除此工作行事 (若已同步日曆，手機端亦會同步刪除)", key="chk_del_work_confirm")
 
                 if st.button("確認刪除此行事", key="btn_confirm_del_work"):
                     if not confirm_del_work:
-                        st.warning("⚠️️ 請先勾選上方的確認核取方塊以防止誤刪！")
+                        st.warning("⚠️ 請先勾選上方的確認核取方塊以防止誤刪！")
                     else:
-                        # 1. 取得關聯的日曆 eventId 並連動刪除 Google 日曆事件
                         cal_id = str(del_curr.get("google_event_id", "")).strip()
                         cal_deleted, cal_msg = delete_google_calendar_event(cal_id)
 
-                        # 2. 自資料庫中移除
                         df_w = df_w[df_w["id"].astype(str) != target_del_id]
                         save_data("work_events", df_w)
 
