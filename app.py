@@ -396,7 +396,7 @@ def get_daily_roster(query_date_str):
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 (清晰顯示每日行事標題與時段) ====================
+# ==================== 模組 0: 互動月曆視圖 (清晰整齊色塊排版優化) ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事、排休與調班月曆")
     
@@ -406,7 +406,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     c_m_top1, c_m_top2 = st.columns([4, 1])
     with c_m_top1:
-        st.info("💡 藍色代表【工作事項】，橘色代表【同仁排休】，紫色代表【臨時調班】。月曆格子內已清楚標示「時段」與「標題」。")
+        st.info("💡 藍色色塊代表【工作行事】，橘色色塊代表【同仁排休】，紫色色塊代表【臨時調班】。點擊事件可查看詳細說明。")
     with c_m_top2:
         if st.button("🔄 重新整理月曆資料"):
             st.rerun()
@@ -415,7 +415,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     calendar_events = []
 
-    # 1. 組裝排休事件 (全天事件)
+    # 1. 組裝排休事件 (全天事件，全實心橘色標籤)
     for _, row in df_schedules.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         s_date_raw = str(row.get("start_date", "")).strip()
@@ -447,7 +447,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 2. 組裝調班事件 (全天事件)
+    # 2. 組裝調班事件 (全天事件，全實心紫色標籤)
     for _, row in df_swaps.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         sw_d = str(row.get("swap_date", "")).strip()
@@ -478,7 +478,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 3. 組裝工作行事事件 (精準標題與時段)
+    # 3. 組裝工作行事事件 (實心藍色色塊標籤，去除標題內的重複時間)
     for _, row in df_works.iterrows():
         title = str(row.get("title", "")).strip()
         s_d = str(row.get("start_date", "")).strip()
@@ -490,11 +490,11 @@ if menu == "🗓️ 互動月曆視圖":
         real_end_time = parse_and_normalize_time(row.get("end_time"), default="10:00")
         pic = str(row.get("person_in_charge", "全體")).strip()
 
-        # 在標題中清楚融入時段區間與負責人，月曆方塊一眼看懂
-        event_display_title = f"{real_start_time}-{real_end_time} [{pic}] {title}"
+        # 標題只保留負責人與事項名稱，避免與日曆前端時間重疊擠壓！
+        clean_event_title = f"[{pic}] {title}"
 
         calendar_events.append({
-            "title": event_display_title,
+            "title": clean_event_title,
             "start": f"{s_d}T{real_start_time}:00",
             "end": f"{e_d}T{real_end_time}:00",
             "allDay": False,
@@ -511,20 +511,27 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 月曆配置：強化月檢視 (dayGridMonth) 的標題與時段顯示
+    # 月曆配置：按鈕全面中文化、強制使用塊狀色塊（block）避免小圓點擠壓
     calendar_options = {
         "headerToolbar": {
             "left": "today prev,next",
             "center": "title",
             "right": "dayGridMonth,timeGridWeek,listMonth",
         },
+        "buttonText": {
+            "today": "今天",
+            "month": "月曆",
+            "week": "週檢視",
+            "list": "清單",
+        },
         "initialView": "dayGridMonth",
         "navLinks": True,
         "selectable": True,
         "editable": False,
         "locale": "zh-tw",
-        "displayEventTime": True,
-        "displayEventEnd": True,
+        "eventDisplay": "block",          # 強制將事件以色塊卡片顯示，不再只是小點加文字
+        "displayEventTime": True,          # 顯示時間
+        "displayEventEnd": True,           # 顯示結束時間 (如 10:00 - 12:30)
         "eventTimeFormat": {
             "hour": "2-digit",
             "minute": "2-digit",
@@ -533,28 +540,46 @@ if menu == "🗓️ 互動月曆視圖":
         },
     }
 
-    # 自訂 CSS 樣式：取消強制單行截斷、調大字體並讓標題與時間美觀換行
+    # 自訂 CSS：美化色塊、調整字體與行距、月曆格子適當展開
     custom_css = """
+        /* 月曆單格高度與背景 */
+        .fc-daygrid-day-frame {
+            min-height: 120px !important;
+        }
+        /* 事件色塊樣式 */
         .fc-event {
-            padding: 2px 4px !important;
+            padding: 3px 5px !important;
+            margin: 2px 1px !important;
             border-radius: 4px !important;
-            margin-bottom: 2px !important;
+            border: none !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.12) !important;
             cursor: pointer !important;
         }
-        .fc-event-title {
-            font-size: 0.85rem !important;
-            font-weight: 500 !important;
-            white-space: normal !important;
-            word-break: break-word !important;
-            line-height: 1.25 !important;
-        }
+        /* 事件時間標籤 */
         .fc-event-time {
-            font-size: 0.78rem !important;
-            font-weight: bold !important;
+            font-size: 0.75rem !important;
+            font-weight: 700 !important;
+            color: #FFFFFF !important;
             margin-right: 4px !important;
+            display: inline-block !important;
         }
-        .fc-daygrid-day-frame {
-            min-height: 110px !important;
+        /* 事件標題文字 */
+        .fc-event-title {
+            font-size: 0.82rem !important;
+            font-weight: 500 !important;
+            color: #FFFFFF !important;
+            white-space: normal !important;
+            line-height: 1.3 !important;
+        }
+        /* 頂部按鈕美化 */
+        .fc-button {
+            background-color: #1E88E5 !important;
+            border-color: #1E88E5 !important;
+            font-size: 0.85rem !important;
+        }
+        .fc-button-active {
+            background-color: #1565C0 !important;
+            border-color: #1565C0 !important;
         }
     """
 
@@ -653,7 +678,7 @@ elif menu == "👥 人員名單管理":
                 elif clean_up_name == target_edit_name:
                     st.info("姓名未作任何更動。")
                 elif clean_up_name in CURRENT_EMPLOYEES:
-                    st.error(f"⚠️ 名稱「{clean_up_name}」已存在於其他同仁名單中，請使用其他名稱！")
+                    st.error(f"⚠️️ 名稱「{clean_up_name}」已存在於其他同仁名單中，請使用其他名稱！")
                 else:
                     df_emp = load_data("employees", EMPLOYEE_COLS)
                     df_emp.loc[df_emp["name"].astype(str) == target_edit_name, "name"] = clean_up_name
@@ -670,13 +695,13 @@ elif menu == "👥 人員名單管理":
     with tab_del_emp:
         col_de1, col_de2 = st.columns([1, 1])
         with col_de1:
-            st.subheader("🗑️ 刪減移除離職同仁")
+            st.subheader("🗑️️ 刪減移除離職同仁")
             target_del_name = st.selectbox("請選擇欲移除的同仁", CURRENT_EMPLOYEES, key="sel_del_emp")
             confirm_del = st.checkbox(f"我確認要從在職人員名單中移除「{target_del_name}」", key="chk_confirm_del")
 
             if st.button("確認刪除同仁", key="btn_del_emp"):
                 if not confirm_del:
-                    st.warning("⚠️ 為防止誤刪，請先勾選上方的確認方框！")
+                    st.warning("⚠️️ 為防止誤刪，請先勾選上方的確認方框！")
                 elif len(CURRENT_EMPLOYEES) <= 1:
                     st.error("⚠️ 系統至少需保留 1 位在職人員，無法全數刪除！")
                 else:
@@ -843,7 +868,7 @@ elif menu == "📅 班表、排休與調班":
                         st.error(f"⚠️ 無法登記！當日已有同仁排休：{conflict_info}。依規定每日僅限 1 人排休。")
 
                 if not conflict:
-                    summary = f"🏖️ [排休-{l_type}] {emp}"
+                    summary = f"🏖️️ [排休-{l_type}] {emp}"
                     desc = f"請假同仁：{emp}\n假別：{l_type}\n時間：{start_dt_str} 至 {end_dt_str}\n原因備註：{l_note}"
                     synced, cal_id, sync_msg = sync_event_to_google_calendar(
                         summary, desc, str(s_date), str(e_date), s_time.strftime("%H:%M"), e_time.strftime("%H:%M")
@@ -980,7 +1005,7 @@ elif menu == "📅 班表、排休與調班":
             a_members = [k for k, v in daily_shifts.items() if "A班" in v]
             st.write("、".join(a_members) if a_members else "無")
         with col_b:
-            st.markdown("#### 🅱️️ B班 (08:30 - 17:00)")
+            st.markdown("#### 🅱️ B班 (08:30 - 17:00)")
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
@@ -1164,7 +1189,7 @@ elif menu == "📌 工作行事登記":
                         df_w = df_w[df_w["id"].astype(str) != target_del_id]
                         save_data("work_events", df_w)
 
-                        st.success(f"🗑️ 工作行事已成功刪除！{cal_msg}")
+                        st.success(f"🗑️️ 工作行事已成功刪除！{cal_msg}")
                         st.rerun()
             else:
                 st.info("目前尚無有效的工作行事可供刪除。")
