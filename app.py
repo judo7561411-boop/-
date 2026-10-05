@@ -115,25 +115,18 @@ def get_gspread_client():
     except Exception:
         return None
 
-# ==================== 強化版時間解析與正規化工具函式 ====================
 def parse_and_normalize_time(t_input, default="09:00"):
-    """
-    徹底排查並解析各種輸入時間格式：
-    相容：'14:00', '9:30', '09:30:00', '14點30分', '下午 02:00' 等
-    避免因格式異常而一律被強制覆蓋為 09:00
-    """
+    """相容並解析各種時間輸入格式"""
     if t_input is None:
         return default
     t_str = str(t_input).strip()
     if not t_str or t_str.lower() in ["nan", "none", ""]:
         return default
 
-    # 1. 常見標準 HH:MM 或 HH:MM:SS 格式
     match = re.search(r"(\d{1,2})[:：](\d{1,2})", t_str)
     if match:
         h = int(match.group(1))
         m = int(match.group(2))
-        # 簡易 12/24 小時辨識 (含下午/PM)
         if ("下午" in t_str or "pm" in t_str.lower()) and h < 12:
             h += 12
         elif ("上午" in t_str or "am" in t_str.lower()) and h == 12:
@@ -141,7 +134,6 @@ def parse_and_normalize_time(t_input, default="09:00"):
         if 0 <= h <= 23 and 0 <= m <= 59:
             return f"{h:02d}:{m:02d}"
 
-    # 2. 中文格式 (例如 14點30分、9點)
     match_zh = re.search(r"(\d{1,2})\s*點\s*(\d{1,2})?", t_str)
     if match_zh:
         h = int(match_zh.group(1))
@@ -216,7 +208,7 @@ def get_current_employees():
 CURRENT_EMPLOYEES = get_current_employees()
 EVENT_RESPONSIBLES = ["全體"] + CURRENT_EMPLOYEES
 
-# Google 日曆同步核心
+# Google 日曆同步核心函式 (新增 / 修改)
 def sync_event_to_google_calendar(summary, description, s_date, e_date, s_time, e_time, existing_cal_id=""):
     if not HAS_CALENDAR_LIB:
         return False, "", "缺少日曆套件"
@@ -270,6 +262,30 @@ def sync_event_to_google_calendar(summary, description, s_date, e_date, s_time, 
     except Exception as e:
         return False, "", f"日曆同步失敗：{e}"
 
+# Google 日曆連動刪除函式
+def delete_google_calendar_event(cal_event_id):
+    """自 Google 日曆中連動刪除指定行程"""
+    if not HAS_CALENDAR_LIB or not str(cal_event_id).strip():
+        return False, "無日曆事件 ID 或缺少套件"
+
+    try:
+        calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
+        if not calendar_id:
+            return False, "未設定 calendar_id"
+
+        creds = get_credentials()
+        if not creds:
+            return False, "無法取得憑證"
+
+        service = build("calendar", "v3", credentials=creds)
+        service.events().delete(calendarId=calendar_id, eventId=str(cal_event_id).strip()).execute()
+        return True, "手機 Google 日曆行程已同步刪除！"
+    except Exception as e:
+        # 404 或 410 代表活動本來就已被刪除
+        if "404" in str(e) or "410" in str(e):
+            return True, "日曆活動原已不存在，已同步清除。"
+        return False, f"日曆刪除失敗：{e}"
+
 def batch_sync_all_to_google_calendar():
     calendar_id = st.secrets.get("calendar_id", "").strip().strip('"').strip("'")
     if not calendar_id:
@@ -304,7 +320,7 @@ def batch_sync_all_to_google_calendar():
         s_d = str(r.get("start_date", "")).strip()
         e_d = str(r.get("end_date", "")).strip() if str(r.get("end_date", "")).strip() else s_d
         desc = f"請假同仁：{emp}\n假別：{r.get('leave_type', '')}\n原因備註：{r.get('note', '')}"
-        ok, new_id, _ = sync_event_to_google_calendar(f"🏖️️ [排休-{r.get('leave_type', '')}] {emp}", desc, s_d, e_d, "08:00", "17:00", r.get("google_event_id", ""))
+        ok, new_id, _ = sync_event_to_google_calendar(f"🏖️ [排休-{r.get('leave_type', '')}] {emp}", desc, s_d, e_d, "08:00", "17:00", r.get("google_event_id", ""))
         if ok:
             df_sch.at[idx, "google_event_id"] = new_id
             success_cnt += 1
@@ -347,7 +363,7 @@ if "calendar_id" in st.secrets and HAS_CALENDAR_LIB:
 elif not HAS_CALENDAR_LIB:
     st.sidebar.warning("⚠️ 系統正在載入日曆套件，請稍候重整")
 else:
-    st.sidebar.warning("⚠️️ Google 日曆同步：未在 Secrets 設定 calendar_id")
+    st.sidebar.warning("⚠️ Google 日曆同步：未在 Secrets 設定 calendar_id")
 
 menu = st.sidebar.radio(
     "系統模組切換",
@@ -382,7 +398,7 @@ def get_daily_roster(query_date_str):
             roster[str(row["employee_name"])] = str(row["assigned_shift"])
     return roster
 
-# ==================== 模組 0: 互動月曆視圖 (徹底解決時間顯示 09:00 問題) ====================
+# ==================== 模組 0: 互動月曆視圖 ====================
 if menu == "🗓️ 互動月曆視圖":
     st.header("🗓️ 整合工作行事、排休與調班月曆")
     
@@ -401,7 +417,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     calendar_events = []
 
-    # 1. 組裝排休事件 (全天事件)
+    # 1. 排休事件
     for _, row in df_schedules.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         s_date_raw = str(row.get("start_date", "")).strip()
@@ -433,7 +449,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 2. 組裝調班事件 (全天事件)
+    # 2. 調班事件
     for _, row in df_swaps.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         sw_d = str(row.get("swap_date", "")).strip()
@@ -464,7 +480,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 3. 組裝工作行事事件 (精準解析起訖時段，不再硬寫為 09:00)
+    # 3. 工作行事事件
     for _, row in df_works.iterrows():
         title = str(row.get("title", "")).strip()
         s_d = str(row.get("start_date", "")).strip()
@@ -472,7 +488,6 @@ if menu == "🗓️ 互動月曆視圖":
             continue
         e_d = str(row.get("end_date", "")).strip() if str(row.get("end_date", "")).strip() else s_d
         
-        # 透過解析函式獲取真實登記的開始與結束時間
         real_start_time = parse_and_normalize_time(row.get("start_time"), default="09:00")
         real_end_time = parse_and_normalize_time(row.get("end_time"), default="10:00")
         pic = str(row.get("person_in_charge", "全體")).strip()
@@ -527,7 +542,7 @@ if menu == "🗓️ 互動月曆視圖":
         col_c1, col_c2, col_c3 = st.columns(3)
         col_c1.metric("類別與性質", detail.get("類別", ""))
         col_c2.metric("對象 / 負責同仁", detail.get("對象", ""))
-        col_c3.metric("真實時間時段", detail.get("時間明細", ""))
+        col_c3.metric("時間時段", detail.get("時間明細", ""))
         st.markdown(f"**🗓️ 日期區間：** `{detail.get('日期區間', '')}`")
         st.markdown("**📝 內容與備註說明：**")
         st.info(detail.get("詳細內容/備註", "無"))
@@ -571,7 +586,7 @@ elif menu == "👥 人員名單管理":
                 if not clean_name:
                     st.warning("請填寫同仁姓名！")
                 elif clean_name in CURRENT_EMPLOYEES:
-                    st.error(f"⚠️️ 同仁「{clean_name}」已經存在於系統名單中，請勿重複新增。")
+                    st.error(f"⚠️ 同仁「{clean_name}」已經存在於系統名單中，請勿重複新增。")
                 else:
                     df_emp = load_data("employees", EMPLOYEE_COLS)
                     valid_ids = pd.to_numeric(df_emp["id"], errors="coerce").dropna()
@@ -639,7 +654,7 @@ elif menu == "👥 人員名單管理":
                     df_emp = df_emp[df_emp["name"].astype(str) != target_del_name]
                     save_data("employees", df_emp)
 
-                    st.success(f"🗑️ 已成功自名單中移除同仁「{target_del_name}」！全系統名單已同步更新。")
+                    st.success(f"🗑️️ 已成功自名單中移除同仁「{target_del_name}」！全系統名單已同步更新。")
                     st.rerun()
 
         with col_de2:
@@ -939,9 +954,9 @@ elif menu == "📅 班表、排休與調班":
             b_members = [k for k, v in daily_shifts.items() if "B班" in v]
             st.write("、".join(b_members) if b_members else "無")
 
-# ==================== 模組 4: 工作行事登記 (徹底解決時間覆蓋與格式問題) ====================
+# ==================== 模組 4: 工作行事登記 (支援 新增 / 編輯 / 刪除 及連動日曆) ====================
 elif menu == "📌 工作行事登記":
-    st.header("📌 工作行事管理 (新增/修改均即時全自動同步 Google 日曆)")
+    st.header("📌 工作行事管理 (新增/修改/刪除 均即時全自動連動 Google 日曆)")
 
     with st.expander("🔄 批次將現存所有「行事+排休+調班」同步至 Google 日曆 (點此展開)"):
         st.write("點擊下方按鈕可一次性將系統內的所有工作行程、同仁排休與臨時調班全面同步至 Google 日曆並開啟手機提醒：")
@@ -957,8 +972,9 @@ elif menu == "📌 工作行事登記":
         with col_b2:
             st.caption("註：系統會將所有項目自動設定在台灣時間 (UTC+8)，並預設活動前 15 分鐘與 12 小時發出手機提醒。")
 
-    tab_act_add, tab_act_edit = st.tabs(["➕ 新增工作行事", "✏️ 修改既有行事"])
+    tab_act_add, tab_act_edit, tab_act_del = st.tabs(["➕ 新增工作行事", "✏️ 修改既有行事", "🗑️ 刪除工作行事"])
 
+    # 1. 新增工作行事
     with tab_act_add:
         col_e1, col_e2 = st.columns([1, 2])
         with col_e1:
@@ -982,7 +998,6 @@ elif menu == "📌 工作行事登記":
                 elif event_s_date == event_e_date and event_s_time >= event_e_time:
                     st.error("同一天活動的結束時間必須晚於開始時間！")
                 else:
-                    # 明確強制格式化為 HH:MM 格式，防止存入空值或非字串格式
                     s_t_str = event_s_time.strftime("%H:%M")
                     e_t_str = event_e_time.strftime("%H:%M")
 
@@ -1012,7 +1027,7 @@ elif menu == "📌 工作行事登記":
                     st.rerun()
 
         with col_e2:
-            st.subheader("📋 最新工作行事清單 (含時間確認)")
+            st.subheader("📋 最新工作行事清單")
             df_w = load_data("work_events", WORK_EVENT_COLS)
             disp_cols = ["id", "start_date", "end_date", "start_time", "end_time", "person_in_charge", "title", "description"]
             if not df_w.empty:
@@ -1020,6 +1035,7 @@ elif menu == "📌 工作行事登記":
             else:
                 st.info("目前尚無任何工作行事紀錄。")
 
+    # 2. 修改既有行事
     with tab_act_edit:
         st.subheader("✏️ 修改工作行事 (修正時間並連動 Google 日曆)")
         df_w = load_data("work_events", WORK_EVENT_COLS)
@@ -1043,7 +1059,6 @@ elif menu == "📌 工作行事登記":
                         cur_wsd = date.today()
                     new_w_sd = st.date_input("開始日期", value=cur_wsd, key="ew_sd")
                     
-                    # 精準還原真實時間
                     try:
                         cur_wst_str = parse_and_normalize_time(w_curr.get("start_time"), "09:00")
                         cur_wst = datetime.strptime(cur_wst_str, "%H:%M").time()
@@ -1091,6 +1106,43 @@ elif menu == "📌 工作行事登記":
                 st.info("目前尚無有效的工作行事可供修改。")
         else:
             st.info("目前尚無工作行事可供修改。")
+
+    # 3. 刪除工作行事 (全新功能：連動刪除 Google 日曆事件)
+    with tab_act_del:
+        st.subheader("🗑️ 刪除工作行事 (手機 Google 日曆將同步刪除)")
+        df_w = load_data("work_events", WORK_EVENT_COLS)
+        if not df_w.empty and len(df_w) > 0:
+            del_options = {
+                f"編號 {r['id']} | [{r['person_in_charge']}] {r['title']} ({r['start_date']} {r['start_time']}~{r['end_time']})": str(r['id'])
+                for _, r in df_w.iterrows() if str(r['title']).strip()
+            }
+            if del_options:
+                del_choice = st.selectbox("請選擇欲刪除的工作行事", list(del_options.keys()), key="sel_del_work")
+                target_del_id = del_options[del_choice]
+                del_curr = df_w[df_w["id"].astype(str) == target_del_id].iloc[0]
+
+                # 顯示預覽卡片
+                st.warning(f"⚠️ 即將刪除：**[{del_curr['person_in_charge']}] {del_curr['title']}**\n\n日期時段：`{del_curr['start_date']} {del_curr['start_time']} ~ {del_curr['end_time']}`\n\n內容說明：{del_curr['description'] if str(del_curr['description']).strip() else '無'}")
+                confirm_del_work = st.checkbox("我確認要永久刪除此工作行事 (若已同步日曆，手機端亦會同步刪除)", key="chk_del_work_confirm")
+
+                if st.button("確認刪除此行事", key="btn_confirm_del_work"):
+                    if not confirm_del_work:
+                        st.warning("⚠️️ 請先勾選上方的確認核取方塊以防止誤刪！")
+                    else:
+                        # 1. 取得關聯的日曆 eventId 並連動刪除 Google 日曆事件
+                        cal_id = str(del_curr.get("google_event_id", "")).strip()
+                        cal_deleted, cal_msg = delete_google_calendar_event(cal_id)
+
+                        # 2. 自資料庫中移除
+                        df_w = df_w[df_w["id"].astype(str) != target_del_id]
+                        save_data("work_events", df_w)
+
+                        st.success(f"🗑️ 工作行事已成功刪除！{cal_msg}")
+                        st.rerun()
+            else:
+                st.info("目前尚無有效的工作行事可供刪除。")
+        else:
+            st.info("目前尚無任何工作行事紀錄。")
 
 # ==================== 模組 5: 3C產品借用申請 ====================
 elif menu == "📱 3C產品借用申請":
