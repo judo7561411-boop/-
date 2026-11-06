@@ -159,7 +159,6 @@ def get_worksheet(sheet_name: str, default_cols: list):
         except Exception:
             return None
 
-# 短期快取保護，防止頁面卡死
 @st.cache_data(ttl=30, show_spinner=False)
 def load_data(sheet_name: str, default_cols: list) -> pd.DataFrame:
     ws = get_worksheet(sheet_name, default_cols)
@@ -419,7 +418,7 @@ if menu == "🗓️ 互動月曆視圖":
 
     calendar_events = []
 
-    # 1. 組裝排休事件
+    # 1. 排休事件
     for _, row in df_schedules.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         s_date_raw = str(row.get("start_date", "")).strip()
@@ -451,7 +450,7 @@ if menu == "🗓️ 互動月曆視圖":
             },
         })
 
-    # 2. 組裝調班事件
+    # 2. 調班事件
     for _, row in df_swaps.iterrows():
         emp = str(row.get("employee_name", "")).strip()
         sw_d = str(row.get("swap_date", "")).strip()
@@ -635,7 +634,7 @@ elif menu == "👥 人員名單管理":
                 if not clean_name:
                     st.warning("請填寫同仁姓名！")
                 elif clean_name in CURRENT_EMPLOYEES:
-                    st.error(f"⚠️️ 同仁「{clean_name}」已經存在於系統名單中，請勿重複新增。")
+                    st.error(f"⚠️ 同仁「{clean_name}」已經存在於系統名單中，請勿重複新增。")
                 else:
                     df_emp = load_data("employees", EMPLOYEE_COLS)
                     valid_ids = pd.to_numeric(df_emp["id"], errors="coerce").dropna()
@@ -821,7 +820,7 @@ elif menu == "📤 匯出每月綜合報表":
             mime="text/csv",
         )
 
-# ==================== 模組 3: 班表、排休與調班 (升級：一站式編輯、刪減與過期隱藏) ====================
+# ==================== 模組 3: 班表、排休與調班 ====================
 elif menu == "📅 班表、排休與調班":
     st.header("📅 班表排班、排休與調班 (支援即時自動連動 Google 日曆與提醒)")
 
@@ -829,7 +828,6 @@ elif menu == "📅 班表、排休與調班":
         ["📝 請假/排休登記", "✏️ 編輯與刪除排休紀錄", "🔄 臨時調班申請", "👀 當日班表與休假查詢"]
     )
 
-    # 1. 新增排休登記
     with tab_leave_add:
         st.subheader("新增排休 (每日限制最多 1 人，登記自動寫入手機日曆)")
         col_l1, col_l2 = st.columns(2)
@@ -886,7 +884,6 @@ elif menu == "📅 班表、排休與調班":
                         st.success("✅ 排休登記成功！(日曆同步已留存備援)")
                     st.rerun()
 
-    # 2. 編輯與刪除排休紀錄 (全新升級：過期自動隱藏 + 選取數據自動帶入 + 同頁直接刪除連動日曆)
     with tab_leave_manage:
         st.subheader("✏️ 編輯或刪除排休紀錄 (自動連動手機 Google 日曆更新或移除)")
         
@@ -920,7 +917,6 @@ elif menu == "📅 班表、排休與調班":
                     target_sch_id = sch_options[selected_label]
                     curr_sch = df_sch_all[df_sch_all["id"].astype(str) == target_sch_id].iloc[0]
 
-                    # 解析選定項目的真實數據
                     cur_emp_name = str(curr_sch.get("employee_name", ""))
                     cur_leave_type = str(curr_sch.get("leave_type", "特休"))
                     try:
@@ -933,7 +929,6 @@ elif menu == "📅 班表、排休與調班":
                         cur_ed_val = cur_sd_val
                     cur_note_val = str(curr_sch.get("note", ""))
 
-                    # 動態綁定 Key 確保切換後數據 100% 精準自動帶入
                     c_e1, c_e2 = st.columns(2)
                     with c_e1:
                         emp_idx = CURRENT_EMPLOYEES.index(cur_emp_name) if cur_emp_name in CURRENT_EMPLOYEES else 0
@@ -953,7 +948,6 @@ elif menu == "📅 班表、排休與調班":
 
                     with col_btn_lsave:
                         if st.button("💾 儲存排休修改 (連動更新日曆)", key=f"btn_lsave_{target_sch_id}"):
-                            # 檢查是否有同日他人排休衝突
                             conflict = False
                             c_rows = df_sch_all[
                                 (df_sch_all["id"].astype(str) != target_sch_id) &
@@ -987,7 +981,7 @@ elif menu == "📅 班表、排休與調班":
                         confirm_del_leave = st.checkbox("確認刪除此筆排休", key=f"chk_ldel_{target_sch_id}")
                         if st.button("🗑️ 刪除此排休 (連動移除日曆)", key=f"btn_ldel_{target_sch_id}"):
                             if not confirm_del_leave:
-                                st.warning("⚠️ 請先勾選「確認刪除此筆排休」以防止誤刪！")
+                                st.warning("⚠️ 請先勾選「確認刪除此筆排休」以防止誤按！")
                             else:
                                 cal_id = str(curr_sch.get("google_event_id", "")).strip()
                                 cal_deleted, cal_msg = delete_google_calendar_event(cal_id)
@@ -1004,7 +998,6 @@ elif menu == "📅 班表、排休與調班":
         else:
             st.info("目前尚無任何同仁排休紀錄。")
 
-    # 3. 臨時調班登記
     with tab_swap:
         st.subheader("臨時調班登記 (自動連動至 Google 日曆並提醒)")
         col_s1, col_s2 = st.columns(2)
@@ -1041,7 +1034,6 @@ elif menu == "📅 班表、排休與調班":
             st.success(f"✅ {swap_d} {swap_emp} 已成功調整為 {assigned}，並已同步至 Google 日曆！")
             st.rerun()
 
-    # 4. 當日班表與休假查詢
     with tab_schedule_view:
         st.subheader("查詢當日實際班表與提醒")
         check_date = st.date_input("選擇欲查詢日期", value=date.today())
@@ -1057,7 +1049,7 @@ elif menu == "📅 班表、排休與調班":
                 st.warning(f"🏖️ 休假提醒：**{lv['employee_name']}** 今日請【{lv['leave_type']}假】 (原因: {lv['note']})")
 
         df_sw_check = load_data("shift_swaps", SWAP_COLS)
-        today_swaps = df_sw_check[df_sw_check["swap_date"].astype(str) == str(check_date)]
+        today_swaps = df_sw_check[df_swaps["swap_date"].astype(str) == str(check_date)] if not df_swaps.empty else pd.DataFrame()
         if not today_swaps.empty:
             for _, sw in today_swaps.iterrows():
                 st.info(f"🔄 調班提醒：**{sw['employee_name']}** 今日臨時調整為【{sw['assigned_shift']}】 (原因: {sw['reason']})")
@@ -1092,7 +1084,6 @@ elif menu == "📌 工作行事登記":
 
     tab_act_add, tab_act_manage = st.tabs(["➕ 新增工作行事", "✏️ 編輯與刪除既有行事"])
 
-    # 1. 新增工作行事
     with tab_act_add:
         col_e1, col_e2 = st.columns([1, 2])
         with col_e1:
@@ -1153,7 +1144,6 @@ elif menu == "📌 工作行事登記":
             else:
                 st.info("目前尚無任何工作行事紀錄。")
 
-    # 2. 編輯與刪除既有行事
     with tab_act_manage:
         st.subheader("✏️ 編輯或刪除工作行事 (操作一站搞定，連動更新/刪除手機日曆)")
         
@@ -1366,11 +1356,12 @@ elif menu == "📱 3C產品借用申請":
         else:
             st.info("目前尚無 3C 借用紀錄可供修改。")
 
-# ==================== 模組 6: 影印輸出登記 ====================
+# ==================== 模組 6: 影印輸出登記 (全新升級：自訂日期區間填空計算與匯出) ====================
 elif menu == "🖨️ 影印輸出登記":
-    st.header("🖨️ 影印輸出登記與每月報表")
-    tab_p_reg, tab_p_month = st.tabs(["📝 影印登記", "📊 每月影印統計與輸出"])
+    st.header("🖨️ 影印輸出登記與報表統計")
+    tab_p_reg, tab_p_range = st.tabs(["📝 影印登記", "📊 自訂日期區間統計與匯出"])
 
+    # 1. 影印登記
     with tab_p_reg:
         with st.form("print_form"):
             col_p1, col_p2 = st.columns(2)
@@ -1396,75 +1387,86 @@ elif menu == "🖨️ 影印輸出登記":
         df_p = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
         st.dataframe(df_p.tail(20).iloc[::-1], width="stretch")
 
-    with tab_p_month:
-        st.subheader("📊 依月份查詢與匯出影印報表")
-        col_py, col_pm = st.columns(2)
-        with col_py:
-            p_year = st.selectbox("選擇年份", [2025, 2026, 2027], index=1, key="py_sel")
-        with col_pm:
-            p_month = st.selectbox("選擇月份", list(range(1, 13)), index=datetime.today().month - 1, key="pm_sel")
+    # 2. 自訂日期範圍計算與匯出 (全新彈性填空計算)
+    with tab_p_range:
+        st.subheader("📊 自行填寫計算日期範圍與輸出報表")
+        st.write("可自行指定任意起始與結束日期（例如專案期間、單週或跨月份），系統將自動彙總計算該區間的影印張數：")
 
-        _, p_num_days = py_calendar.monthrange(p_year, p_month)
-        p_month_str = f"{p_year}-{p_month:02d}"
+        today_val = date.today()
+        # 預設起訖日為當月 1 號至當天
+        default_start = today_val.replace(day=1)
+        default_end = today_val
+
+        col_dr1, col_dr2 = st.columns(2)
+        with col_dr1:
+            custom_s_date = st.date_input("📅 計算起始日期", value=default_start, key="custom_p_sdate")
+        with col_dr2:
+            custom_e_date = st.date_input("📅 計算結束日期", value=default_end, min_value=custom_s_date, key="custom_p_edate")
 
         df_all_prints = load_data("print_logs", ["log_date", "user_name", "pages", "print_type", "purpose"])
         if not df_all_prints.empty:
             df_all_prints["pages_num"] = pd.to_numeric(df_all_prints["pages"], errors="coerce").fillna(0).astype(int)
-            cur_month_df = df_all_prints[
-                (df_all_prints["log_date"].astype(str) >= f"{p_month_str}-01") &
-                (df_all_prints["log_date"].astype(str) <= f"{p_month_str}-{p_num_days:02d}")
+            # 依使用者自訂填空的起訖日期精準過濾
+            df_filtered = df_all_prints[
+                (df_all_prints["log_date"].astype(str) >= str(custom_s_date)) &
+                (df_all_prints["log_date"].astype(str) <= str(custom_e_date))
             ].copy()
         else:
-            cur_month_df = pd.DataFrame()
+            df_filtered = pd.DataFrame()
 
-        if not cur_month_df.empty:
-            summary = cur_month_df.groupby(["user_name", "print_type"])["pages_num"].sum().unstack(fill_value=0)
+        st.divider()
+
+        if not df_filtered.empty:
+            # 依同仁與色彩規格交叉彙總
+            summary_p = df_filtered.groupby(["user_name", "print_type"])["pages_num"].sum().unstack(fill_value=0)
             for c in ["黑白", "彩色"]:
-                if c not in summary.columns:
-                    summary[c] = 0
-            summary["個人合計"] = summary["黑白"] + summary["彩色"]
-            summary = summary.reset_index().rename(columns={"user_name": "同仁姓名"})
+                if c not in summary_p.columns:
+                    summary_p[c] = 0
+            summary_p["個人合計"] = summary_p["黑白"] + summary_p["彩色"]
+            summary_p = summary_p.reset_index().rename(columns={"user_name": "同仁姓名"})
 
-            total_bw = summary["黑白"].sum()
-            total_color = summary["彩色"].sum()
-            total_all = summary["個人合計"].sum()
+            # 全體指標
+            total_bw = summary_p["黑白"].sum()
+            total_color = summary_p["彩色"].sum()
+            total_all = summary_p["個人合計"].sum()
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("當月全體黑白總量", f"{total_bw} 張")
-            m2.metric("當月全體彩色總量", f"{total_color} 張")
-            m3.metric("當月總輸出張數", f"{total_all} 張")
+            m1.metric(f"區間黑白總印量", f"{total_bw} 張")
+            m2.metric(f"區間彩色總印量", f"{total_color} 張")
+            m3.metric(f"區間總計輸出", f"{total_all} 張")
 
-            st.markdown("#### 👤 同仁個別印量總計")
-            st.dataframe(summary, width="stretch")
+            st.markdown(f"#### 👤 同仁個別印量總計 (`{custom_s_date}` 至 `{custom_e_date}`)")
+            st.dataframe(summary_p, width="stretch")
 
-            st.markdown("#### 📄 當月影印明細流水帳")
-            disp_detail = cur_month_df[["log_date", "user_name", "pages", "print_type", "purpose"]].rename(
+            st.markdown("#### 📄 該區間影印明細流水帳")
+            disp_detail = df_filtered[["log_date", "user_name", "pages", "print_type", "purpose"]].rename(
                 columns={"log_date": "影印日期", "user_name": "登記人", "pages": "張數", "print_type": "色彩規格", "purpose": "用途"}
             )
             st.dataframe(disp_detail, width="stretch")
 
+            # 產生 Excel 檔案
             p_excel_buf = io.BytesIO()
             with pd.ExcelWriter(p_excel_buf, engine="openpyxl") as p_writer:
-                summary.to_excel(p_writer, sheet_name="同仁影印統計彙總", index=False)
-                disp_detail.to_excel(p_writer, sheet_name="當月影印明細", index=False)
+                summary_p.to_excel(p_writer, sheet_name="同仁影印統計彙總", index=False)
+                disp_detail.to_excel(p_writer, sheet_name="影印明細流水帳", index=False)
 
             col_pd1, col_pd2 = st.columns(2)
             with col_pd1:
                 st.download_button(
-                    label=f"📥 下載 {p_year}年{p_month}月 影印報表 (Excel 檔)",
+                    label=f"📥 下載 [{custom_s_date}至{custom_e_date}] 影印 Excel 報表",
                     data=p_excel_buf.getvalue(),
-                    file_name=f"{p_year}年{p_month}月_公司影印使用報表.xlsx",
+                    file_name=f"{custom_s_date}至{custom_e_date}_公司影印報表.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             with col_pd2:
                 st.download_button(
-                    label=f"📥 下載 {p_year}年{p_month}月 影印統計 (CSV 檔)",
-                    data=summary.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"{p_year}年{p_month}月_影印統計.csv",
+                    label=f"📥 下載 [{custom_s_date}至{custom_e_date}] 影印統計 CSV",
+                    data=summary_p.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{custom_s_date}至{custom_e_date}_影印統計.csv",
                     mime="text/csv",
                 )
         else:
-            st.info(f"{p_year} 年 {p_month} 月 目前尚無任何影印登記紀錄。")
+            st.info(f"💡 在 `{custom_s_date}` 至 `{custom_e_date}` 區間內，目前尚無任何影印登記紀錄。")
 
 # ==================== 模組 7: 物資出入庫管理 ====================
 elif menu == "📦 物資出入庫管理":
